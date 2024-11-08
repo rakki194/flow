@@ -1,0 +1,10 @@
+torch==2.4.0
+torchvision
+numpy
+matplotlib
+tensorboard
+torch_tb_profiler
+tqdm
+wandb
+einops
+pillow-jxl-plugin
