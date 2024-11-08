@@ -3,7 +3,7 @@ import sys
 import math
 import random
 from tqdm import tqdm
-
+import pandas as pd
 csv.field_size_limit(sys.maxsize)
 
 
@@ -87,6 +87,8 @@ def create_bucket_column(
     # image resolution metadata columns
     image_height_index = header.index(height_col_name)
     image_width_index = header.index(width_col_name)
+
+    
     multires_buckets = []
     for res in base_resolution:
         buckets = _bucket_generator(res, ratio_cutoff, step)
@@ -135,3 +137,59 @@ def create_bucket_column(
 
     if return_bucket:
         return standardized_buckets
+
+
+def create_bucket_column_pandas(
+    in_csv_path,
+    out_csv_path,
+    base_resolution, # Need to be an array like this: `[384, 512, 640, 768, 896, 1024]`
+    step=8,
+    ratio_cutoff=2,
+    height_col_name="image_height",
+    width_col_name="image_width",
+    chunksize=1000,
+):
+    # NOTE: BE CAREFUL THIS FUNCTION APPENDS to OUTPUT CSV RATHER THAN OVERWRITE!
+    # create a list of resolution bucket given base resolution
+    # example
+    # 384: [(512, 256), (448, 320), (384, 384), (320, 448), (256, 512)]
+    # 512: [(704, 320), (640, 384), (576, 448), (512, 512), (448, 576), (384, 640), (320, 704)]
+    multires_buckets = {}
+    for res in base_resolution:
+        buckets = _bucket_generator(res, ratio_cutoff, step)
+        multires_buckets[res] = buckets
+
+    # create scaled version for easy distance calculation 
+    # {
+    #     (1.41, 0.70): (512, 256), 
+    #     (1.18, 0.84): (448, 320), 
+    #     (1.0, 1.0): (384, 384), 
+    #     (0.84, 1.18): (320, 448), 
+    #     (0.70, 1.41): (256, 512)
+    # }
+    standardized_buckets = {}
+    for res, buckets in tqdm(multires_buckets.items(), total=len(multires_buckets), desc="creating multi-res buckets"):
+        this_standardized_bucket = {}
+        for bucket in buckets:
+            b_st = _normalize_width_height(*bucket)  # (w, h)
+            this_standardized_bucket[b_st] = bucket
+        standardized_buckets[res] = this_standardized_bucket
+
+
+    csv_pbar = tqdm(desc="Processing csv chunks", unit_scale=chunksize)
+
+    for df in pd.read_csv(in_csv_path, chunksize=chunksize):
+
+        df["aspect_ratio"] = df[width_col_name]/df[height_col_name]
+        # remove ridiculous aspect ratio
+        df = df[(df.aspect_ratio > 1. / ratio_cutoff) & (df.aspect_ratio < ratio_cutoff)]
+        # normalize width height into relative width height for computing bucket assignment
+        df["norm_width_height"] = df.apply(lambda row: _normalize_width_height(row[width_col_name], row[height_col_name]), axis=1)
+
+        # assign bucket based on euclidean distance 
+        for res, buckets in standardized_buckets.items():
+            df[f"{res}"] = df.apply(lambda row: _closest_bucket(*row["norm_width_height"], buckets), axis=1)
+
+        df.to_csv(out_csv_path, mode='a', index=False, header=not pd.io.common.file_exists(out_csv_path))
+        csv_pbar.update(1)
+        print()

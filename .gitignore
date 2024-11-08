@@ -2,3 +2,5 @@
 init.sh
 /.vscode
 pyrightconfig.json
+__pycache__
+*.csv
