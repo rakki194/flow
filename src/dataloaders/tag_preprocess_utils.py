@@ -1,6 +1,7 @@
 import csv
 from collections import defaultdict
 
+
 def prune(tags: list, tree):
     # Filter nodes with no child nodes in the same set
     filtered_tags = [
@@ -9,6 +10,7 @@ def prune(tags: list, tree):
     # random.shuffle(filtered_tags)
     # filtered_tags = sorted(filtered_tags)
     return filtered_tags
+
 
 def create_tree(csv_path):
     tree = defaultdict(list)

@@ -5,6 +5,7 @@ import math
 import random
 from tqdm import tqdm
 import pandas as pd
+
 csv.field_size_limit(sys.maxsize)
 
 
@@ -68,7 +69,7 @@ def _closest_bucket(w, h, standarized_bucket_dict):
 def create_bucket_column(
     in_csv_path,
     out_csv_path,
-    base_resolution, # Need to be an array like this: `[384, 512, 640, 768, 896, 1024]`
+    base_resolution,  # Need to be an array like this: `[384, 512, 640, 768, 896, 1024]`
     step=8,
     ratio_cutoff=2,
     height_col_name="image_height",
@@ -89,7 +90,6 @@ def create_bucket_column(
     image_height_index = header.index(height_col_name)
     image_width_index = header.index(width_col_name)
 
-    
     multires_buckets = []
     for res in base_resolution:
         buckets = _bucket_generator(res, ratio_cutoff, step)
@@ -99,7 +99,9 @@ def create_bucket_column(
     # for example (1, 1) meaning it's square scaled
     # (1.41, 0.70) <- (1448, 720) non square normalization
     standardized_buckets = list()
-    for buckets in tqdm(multires_buckets, total=len(multires_buckets), desc="creating multi-res buckets"):
+    for buckets in tqdm(
+        multires_buckets, total=len(multires_buckets), desc="creating multi-res buckets"
+    ):
         this_standardized_bucket = dict()
         for bucket in buckets:
             b_st = _normalize_width_height(*bucket)  # (w, h)
@@ -114,8 +116,8 @@ def create_bucket_column(
 
         # guard check
         if image_width > 0 and image_height > 0:
-            aspect_ratio = image_width/image_height
-            if ratio_cutoff > aspect_ratio > 1./ratio_cutoff:
+            aspect_ratio = image_width / image_height
+            if ratio_cutoff > aspect_ratio > 1.0 / ratio_cutoff:
                 w, h = _normalize_width_height(image_width, image_height)
 
                 # randomly choose a resolution
@@ -143,7 +145,7 @@ def create_bucket_column(
 def create_bucket_column_pandas(
     in_csv_path,
     out_path,
-    base_resolution, # Need to be an array like this: `[384, 512, 640, 768, 896, 1024]`
+    base_resolution,  # Need to be an array like this: `[384, 512, 640, 768, 896, 1024]`
     step=8,
     ratio_cutoff=2,
     height_col_name="image_height",
@@ -160,40 +162,51 @@ def create_bucket_column_pandas(
         buckets = _bucket_generator(res, ratio_cutoff, step)
         multires_buckets[res] = buckets
 
-    # create scaled version for easy distance calculation 
+    # create scaled version for easy distance calculation
     # {
-    #     (1.41, 0.70): (512, 256), 
-    #     (1.18, 0.84): (448, 320), 
-    #     (1.0, 1.0): (384, 384), 
-    #     (0.84, 1.18): (320, 448), 
+    #     (1.41, 0.70): (512, 256),
+    #     (1.18, 0.84): (448, 320),
+    #     (1.0, 1.0): (384, 384),
+    #     (0.84, 1.18): (320, 448),
     #     (0.70, 1.41): (256, 512)
     # }
     standardized_buckets = {}
-    for res, buckets in tqdm(multires_buckets.items(), total=len(multires_buckets), desc="creating multi-res buckets"):
+    for res, buckets in tqdm(
+        multires_buckets.items(),
+        total=len(multires_buckets),
+        desc="creating multi-res buckets",
+    ):
         this_standardized_bucket = {}
         for bucket in buckets:
             b_st = _normalize_width_height(*bucket)  # (w, h)
             this_standardized_bucket[b_st] = bucket
         standardized_buckets[res] = this_standardized_bucket
 
-
     csv_pbar = tqdm(desc="Processing csv chunks", unit_scale=chunksize)
 
     for df in pd.read_csv(in_csv_path, chunksize=chunksize):
-
-        df["aspect_ratio"] = df[width_col_name]/df[height_col_name]
+        df["aspect_ratio"] = df[width_col_name] / df[height_col_name]
         # remove ridiculous aspect ratio
-        df = df[(df.aspect_ratio > 1. / ratio_cutoff) & (df.aspect_ratio < ratio_cutoff)]
+        df = df[
+            (df.aspect_ratio > 1.0 / ratio_cutoff) & (df.aspect_ratio < ratio_cutoff)
+        ]
         # normalize width height into relative width height for computing bucket assignment
-        df["norm_width_height"] = df.apply(lambda row: _normalize_width_height(row[width_col_name], row[height_col_name]), axis=1)
+        df["norm_width_height"] = df.apply(
+            lambda row: _normalize_width_height(
+                row[width_col_name], row[height_col_name]
+            ),
+            axis=1,
+        )
 
-        # assign bucket based on euclidean distance 
+        # assign bucket based on euclidean distance
         for res, buckets in standardized_buckets.items():
-            df[f"{res}"] = df.apply(lambda row: _closest_bucket(*row["norm_width_height"], buckets), axis=1)
+            df[f"{res}"] = df.apply(
+                lambda row: _closest_bucket(*row["norm_width_height"], buckets), axis=1
+            )
 
         if os.path.join(*os.path.split(out_path)[:-1]) != "":
             os.makedirs(os.path.join(*os.path.split(out_path)[:-1]), exist_ok=True)
         # df.to_csv(out_csv_path, mode='a', index=False, header=not pd.io.common.file_exists(out_csv_path))
-        df.to_json(out_path, mode='a', orient='records', lines=True)
+        df.to_json(out_path, mode="a", orient="records", lines=True)
         csv_pbar.update(1)
         print()
