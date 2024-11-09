@@ -1,3 +1,4 @@
+import os
 import csv
 import sys
 import math
@@ -141,7 +142,7 @@ def create_bucket_column(
 
 def create_bucket_column_pandas(
     in_csv_path,
-    out_csv_path,
+    out_path,
     base_resolution, # Need to be an array like this: `[384, 512, 640, 768, 896, 1024]`
     step=8,
     ratio_cutoff=2,
@@ -190,6 +191,9 @@ def create_bucket_column_pandas(
         for res, buckets in standardized_buckets.items():
             df[f"{res}"] = df.apply(lambda row: _closest_bucket(*row["norm_width_height"], buckets), axis=1)
 
-        df.to_csv(out_csv_path, mode='a', index=False, header=not pd.io.common.file_exists(out_csv_path))
+        if os.path.join(*os.path.split(out_path)[:-1]) != "":
+            os.makedirs(os.path.join(*os.path.split(out_path)[:-1]), exist_ok=True)
+        # df.to_csv(out_csv_path, mode='a', index=False, header=not pd.io.common.file_exists(out_csv_path))
+        df.to_json(out_path, mode='a', orient='records', lines=True)
         csv_pbar.update(1)
         print()

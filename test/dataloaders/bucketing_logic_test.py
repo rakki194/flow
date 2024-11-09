@@ -12,7 +12,7 @@ import time
 
 start = time.time()
 create_bucket_column_pandas(
-    "post_truncated.csv",
+    "furry_50k_4o/filtered-posts-2024-06-16_with_4o_captions.csv",
     "post_truncated_bucket.csv",
     [384, 512, 640, 768, 896, 1024],
     step=8,
@@ -24,17 +24,17 @@ create_bucket_column_pandas(
 stop = time.time()
 
 print(stop-start)
-start = time.time()
-create_bucket_column(
-    "post_truncated.csv",
-    "post_truncated_bucket.csv",
-    [384, 512, 640, 768, 896, 1024],
-    step=8,
-    ratio_cutoff=2,
-    height_col_name="image_height",
-    width_col_name="image_width",
-    bucket_col_name="bucket",
-    return_bucket=False,
-)
-stop = time.time()
-print(stop-start)
+# start = time.time()
+# create_bucket_column(
+#     "post_truncated.csv",
+#     "post_truncated_bucket.csv",
+#     [384, 512, 640, 768, 896, 1024],
+#     step=8,
+#     ratio_cutoff=2,
+#     height_col_name="image_height",
+#     width_col_name="image_width",
+#     bucket_col_name="bucket",
+#     return_bucket=False,
+# )
+# stop = time.time()
+# print(stop-start)
