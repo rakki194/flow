@@ -1,8 +1,10 @@
 import os
+import sys
 import csv
 import json
 from tqdm import tqdm
 
+csv.field_size_limit(sys.maxsize)
 
 def save_as_jsonl(data, filename):
     """Saves a list of dictionaries as a JSONL file.
@@ -15,7 +17,7 @@ def save_as_jsonl(data, filename):
         os.makedirs(os.path.join(*os.path.split(filename)[:-1]), exist_ok=True)
 
     with open(filename, "w") as f:
-        for item in data:
+        for item in tqdm(data):
             json.dump(item, f)
             f.write("\n")
 
@@ -32,7 +34,7 @@ def read_jsonl(filename):
 
     data = []
     with open(filename, "r") as f:
-        for line in f:
+        for line in tqdm(f):
             data.append(json.loads(line))
     return data
 
@@ -73,6 +75,7 @@ def prepare_jsonl(
     width_col,
     height_col,
     ext_col=None,
+    ext="",
     chunksize=1000,
 ):
     """
@@ -97,10 +100,10 @@ def prepare_jsonl(
 
         for line in f:
             data = json.loads(line)
+            if ext_col:
+                ext = data[ext_col]
             metadata = {
-                "filename": data[filename_col] + "." + data[ext_col]
-                if ext_col
-                else data[filename_col],
+                "filename": data[filename_col] + "." + ext,
                 "caption_or_tags": data[caption_or_tags_col],
                 "width": data[width_col],
                 "height": data[height_col],
