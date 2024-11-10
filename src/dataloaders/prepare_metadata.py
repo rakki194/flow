@@ -4,6 +4,7 @@ import pandas as pd
 from tqdm import tqdm
 
 
+# deprecated
 def prepare_jsonl(
     jsonl_path,
     filename_col,
