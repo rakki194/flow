@@ -8,3 +8,4 @@ tqdm
 wandb
 einops
 pillow-jxl-plugin
+transformers
