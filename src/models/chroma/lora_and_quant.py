@@ -34,7 +34,9 @@ class FusedLoRALayer(nn.Module):
         self.lora_As = nn.Parameter(
             torch.zeros(rank * len(fused_dim_list), in_features)
         )
-        self.lora_Bs = nn.ParameterList([nn.Parameter(torch.zeros(dim, rank)) for dim in fused_dim_list])
+        self.lora_Bs = nn.ParameterList(
+            [nn.Parameter(torch.zeros(dim, rank)) for dim in fused_dim_list]
+        )
         self.scaling = alpha / rank
         self.reset_parameters()
 
@@ -302,16 +304,19 @@ def merge_lora_weights(model, replacement_module=LinearWithLoRA):
 
             if isinstance(lora_layer, LoRALayer):
                 # Merge regular LoRA weights
-                merged_weight = original_linear.weight + (
-                    lora_layer.lora_B @ lora_layer.lora_A
-                ) * lora_layer.scaling
+                merged_weight = (
+                    original_linear.weight
+                    + (lora_layer.lora_B @ lora_layer.lora_A) * lora_layer.scaling
+                )
 
                 # Update the original linear layer's weight
                 original_linear.weight.data.copy_(merged_weight)
 
             elif isinstance(lora_layer, FusedLoRALayer):
                 # Merge Fused LoRA weights
-                lora_As = lora_layer.lora_As.chunk(len(lora_layer.fused_dim_list), dim=0)
+                lora_As = lora_layer.lora_As.chunk(
+                    len(lora_layer.fused_dim_list), dim=0
+                )
                 merged_weight = original_linear.weight.clone()
 
                 start_idx = 0

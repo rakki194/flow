@@ -8,16 +8,17 @@ from .module.layers import (
     DoubleStreamBlock,
     EmbedND,
     LastLayer,
-    MLPEmbedder,
     SingleStreamBlock,
     timestep_embedding,
+    Approximator,
+    distribute_modulations,
 )
 
 
 @dataclass
-class FluxParams:
+class ChromaParams:
     in_channels: int
-    vec_in_dim: int
+    # vec_in_dim: int
     context_in_dim: int
     hidden_size: int
     mlp_ratio: float
@@ -28,15 +29,40 @@ class FluxParams:
     theta: int
     qkv_bias: bool
     guidance_embed: bool
+    approximator_in_dim: int
+    approximator_depth: int
+    approximator_hidden_size: int
     _use_compiled: bool
 
 
-class Flux(nn.Module):
+chroma_params = (
+    ChromaParams(
+        in_channels=64,
+        vec_in_dim=768,
+        context_in_dim=4096,
+        hidden_size=3072,
+        mlp_ratio=4.0,
+        num_heads=24,
+        depth=19,
+        depth_single_blocks=38,
+        axes_dim=[16, 56, 56],
+        theta=10_000,
+        qkv_bias=True,
+        guidance_embed=True,
+        approximator_in_dim=64,
+        approximator_depth=5,
+        approximator_hidden_size=5120,
+        _use_compiled=False,
+    ),
+)
+
+
+class Chroma(nn.Module):
     """
     Transformer model for flow matching on sequences.
     """
 
-    def __init__(self, params: FluxParams):
+    def __init__(self, params: ChromaParams):
         super().__init__()
         self.params = params
         self.in_channels = params.in_channels
@@ -56,12 +82,14 @@ class Flux(nn.Module):
             dim=pe_dim, theta=params.theta, axes_dim=params.axes_dim
         )
         self.img_in = nn.Linear(self.in_channels, self.hidden_size, bias=True)
-        self.time_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size)
-        self.vector_in = MLPEmbedder(params.vec_in_dim, self.hidden_size)
-        self.guidance_in = (
-            MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size)
-            if params.guidance_embed
-            else nn.Identity()
+
+        # TODO: need proper mapping for this approximator output!
+        # currently the mapping is hardcoded in distribute_modulations function
+        self.distilled_guidance_layer = Approximator(
+            params.approximator_in_dim,
+            self.hidden_size,
+            params.approximator_hidden_size,
+            params.approximator_depth,
         )
         self.txt_in = nn.Linear(params.context_in_dim, self.hidden_size)
 
@@ -97,6 +125,10 @@ class Flux(nn.Module):
             use_compiled=params._use_compiled,
         )
 
+        # TODO: move this hardcoded value to config
+        self.mod_index_length = 344
+        self.mod_index = torch.tensor(list(range(self.mod_index_length)))
+
     def forward(
         self,
         img: Tensor,
@@ -104,66 +136,60 @@ class Flux(nn.Module):
         txt: Tensor,
         txt_ids: Tensor,
         timesteps: Tensor,
-        y: Tensor,
-        guidance: Tensor | None = None,
+        guidance: Tensor,
     ) -> Tensor:
         if img.ndim != 3 or txt.ndim != 3:
             raise ValueError("Input img and txt tensors must have 3 dimensions.")
 
         # running on sequences img
-        img = self.img_in(img.to(next(self.img_in.parameters()).device))
-        vec = self.time_in(timestep_embedding(timesteps, 256).to(self.time_in.device))
-        if self.params.guidance_embed:
-            if guidance is None:
-                raise ValueError(
-                    "Didn't get guidance strength for guidance distilled model."
-                )
-            vec = vec + self.guidance_in(timestep_embedding(guidance, 256).to(self.guidance_in.device)).to(vec.device)
-        vec = vec + self.vector_in(y.to(self.vector_in.device)).to(vec.device)
-        txt = self.txt_in(txt.to(next(self.txt_in.parameters()).device))
+        img = self.img_in(img)
+        txt = self.txt_in(txt)
+
+        # hardcoded value
+
+        distill_timestep = timestep_embedding(timesteps, 16)
+        # TODO: need to add toggle to omit this from schnell but that's not a priority
+        distil_guidance = timestep_embedding(guidance, 16)
+        # get all modulation index
+        modulation_index = timestep_embedding(self.mod_index, 32)
+        # we need to broadcast the modulation index here so each batch has all of the index
+        modulation_index = modulation_index.unsqueeze(0).repeat(img.shape[0], 1, 1)
+        # and we need to broadcast timestep and guidance along too
+        timestep_guidance = (
+            torch.cat([distill_timestep, distil_guidance], dim=1)
+            .unsqueeze(1)
+            .repeat(1, self.mod_index_length, 1)
+        )
+        # then and only then we could concatenate it together
+        input_vec = torch.cat([timestep_guidance, modulation_index], dim=-1)
+        mod_vectors = self.distilled_guidance_layer(input_vec)
+        mod_vectors_dict = distribute_modulations(mod_vectors)
 
         ids = torch.cat((txt_ids, img_ids), dim=1)
         pe = self.pe_embedder(ids)
 
         for i, block in enumerate(self.double_blocks):
+            # the guidance replaced by FFN output
+            img_mod = mod_vectors_dict[f"double_blocks.{i}.img_mod.lin"]
+            txt_mod = mod_vectors_dict[f"double_blocks.{i}.txt_mod.lin"]
+            double_mod = [img_mod, txt_mod]
+
             # just in case in different GPU for simple pipeline parallel
-            double_block_device = block.device
             if self.training:
-                img, txt = ckpt.checkpoint(
-                    block,
-                    img.to(double_block_device),
-                    txt.to(double_block_device),
-                    vec.to(double_block_device),
-                    pe.to(double_block_device),
-                )
+                img, txt = ckpt.checkpoint(block, img, txt, pe, double_mod)
             else:
-                img, txt = block(
-                    img=img.to(double_block_device),
-                    txt=txt.to(double_block_device),
-                    vec=vec.to(double_block_device),
-                    pe=pe.to(double_block_device),
-                )
+                img, txt = block(img=img, txt=txt, pe=pe, distill_vec=double_mod)
 
         img = torch.cat((txt, img), 1)
         for i, block in enumerate(self.single_blocks):
-            single_block_device = block.device
+            single_mod = mod_vectors_dict[f"single_blocks.{i}.modulation.lin"]
             if self.training:
-                img = ckpt.checkpoint(
-                    block,
-                    img.to(single_block_device),
-                    vec.to(single_block_device),
-                    pe.to(single_block_device),
-                )
+                img = ckpt.checkpoint(block, img, pe, single_mod)
             else:
-                img = block(
-                    img.to(single_block_device),
-                    vec=vec.to(single_block_device),
-                    pe=pe.to(single_block_device),
-                )
+                img = block(img, pe=pe, distill_vec=single_mod)
         img = img[:, txt.shape[1] :, ...]
-
-        final_layer_device = self.final_layer.device
+        final_mod = mod_vectors_dict["final_layer.adaLN_modulation.1"]
         img = self.final_layer(
-            img.to(final_layer_device), vec.to(final_layer_device)
+            img, distill_vec=final_mod
         )  # (N, T, patch_size ** 2 * out_channels)
         return img

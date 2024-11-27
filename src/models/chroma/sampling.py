@@ -5,7 +5,7 @@ import torch
 from einops import rearrange, repeat
 from torch import Tensor
 
-from .model import Flux
+from .model import Chroma
 
 
 def get_noise(
@@ -26,8 +26,6 @@ def get_noise(
         dtype=dtype,
         generator=torch.Generator(device=device).manual_seed(seed),
     )
-
-
 
 
 def time_shift(mu: float, sigma: float, t: Tensor):
@@ -62,19 +60,20 @@ def get_schedule(
 
 
 def denoise(
-    model: Flux,
+    model: Chroma,
     # model input
     img: Tensor,
     img_ids: Tensor,
     txt: Tensor,
     txt_ids: Tensor,
-    vec: Tensor,
     # sampling parameters
     timesteps: list[float],
     guidance: float = 4.0,
 ):
     # this is ignored for schnell
-    guidance_vec = torch.full((img.shape[0],), guidance, device=img.device, dtype=img.dtype)
+    guidance_vec = torch.full(
+        (img.shape[0],), guidance, device=img.device, dtype=img.dtype
+    )
     for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
         t_vec = torch.full((img.shape[0],), t_curr, dtype=img.dtype, device=img.device)
         pred = model(
@@ -82,7 +81,6 @@ def denoise(
             img_ids=img_ids,
             txt=txt,
             txt_ids=txt_ids,
-            y=vec,
             timesteps=t_vec,
             guidance=guidance_vec,
         )
@@ -93,15 +91,13 @@ def denoise(
 
 
 def denoise_cfg(
-    model: Flux,
+    model: Chroma,
     # model input
     img: Tensor,
     img_ids: Tensor,
     # positive guidance
-    vec: Tensor,
     txt: Tensor,
     # negative guidance
-    neg_vec: Tensor,
     neg_txt: Tensor,
     txt_ids: Tensor,
     # sampling parameters
@@ -111,7 +107,9 @@ def denoise_cfg(
     first_n_steps_without_cfg: int = 4,
 ):
     # this is ignored for schnell
-    guidance_vec = torch.full((img.shape[0],), guidance, device=img.device, dtype=img.dtype)
+    guidance_vec = torch.full(
+        (img.shape[0],), guidance, device=img.device, dtype=img.dtype
+    )
     step_count = 0
     for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
         t_vec = torch.full((img.shape[0],), t_curr, dtype=img.dtype, device=img.device)
@@ -120,7 +118,6 @@ def denoise_cfg(
             img_ids=img_ids,
             txt=txt,
             txt_ids=txt_ids,
-            y=vec,
             timesteps=t_vec,
             guidance=guidance_vec,
         )
@@ -133,18 +130,18 @@ def denoise_cfg(
                 img_ids=img_ids,
                 txt=neg_txt,
                 txt_ids=txt_ids,
-                y=neg_vec,
                 timesteps=t_vec,
                 guidance=guidance_vec,
             )
 
-            pred_cfg = (pred_neg + (pred - pred_neg) * cfg)
+            pred_cfg = pred_neg + (pred - pred_neg) * cfg
 
             img = img + (t_prev - t_curr) * pred_cfg
 
         step_count += 1
 
     return img
+
 
 def unpack(x: Tensor, height: int, width: int) -> Tensor:
     return rearrange(

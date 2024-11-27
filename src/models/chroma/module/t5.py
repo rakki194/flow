@@ -1,3 +1,5 @@
+# forcefully yanked from HF
+
 import math
 
 import torch
@@ -640,7 +642,7 @@ class T5Stack(nn.Module):
     def forward_mid(
         self, hidden_states, attention_mask, position_bias=None, layer_slice=(0, -1)
     ):
-        for i, layer_module in enumerate(self.block[layer_slice[0]: layer_slice[1]]):
+        for i, layer_module in enumerate(self.block[layer_slice[0] : layer_slice[1]]):
             device = layer_module.device
             if self.training:
                 layer_outputs = ckpt.checkpoint(
@@ -665,7 +667,7 @@ class T5Stack(nn.Module):
             hidden_states, _ = layer_outputs[:2]
             position_bias = layer_outputs[2]
         return hidden_states, attention_mask, position_bias
-    
+
     def transfer_ops(self, device, *args):
         return [arg.to(device, non_blocking=True) for arg in args]
 
@@ -680,26 +682,25 @@ class T5Stack(nn.Module):
         def _run_with_no_grad(func, *args, **kwargs):
             with torch.no_grad():
                 return func(*args, **kwargs)
-            
+
         # we need to keep the activation and detached activation
         # separate so we could backprop it later in decoupled manner
 
-        forward_buffer_first = {} # gpu:0 # embedding
-        forward_buffer_stacks_1st = {} # gpu:0 # transformer resnet stack  
-        forward_buffer_stacks_2nd = {} # gpu:1 # transformer resnet stack  
+        forward_buffer_first = {}  # gpu:0 # embedding
+        forward_buffer_stacks_1st = {}  # gpu:0 # transformer resnet stack
+        forward_buffer_stacks_2nd = {}  # gpu:1 # transformer resnet stack
         forward_buffer_last = {}
 
         output_buffer = []
 
         # first layer forward (embedding)
         for i in range(input_ids.shape[0] // microbatch):
-
             # embedding forward
             # dispatch process
             forward_buffer_first[i] = self.dispatcher.submit(
                 lambda: _run_with_no_grad(
-                self.forward_first,
-                (input_ids[(i) * microbatch : (i) * microbatch + microbatch]),
+                    self.forward_first,
+                    (input_ids[(i) * microbatch : (i) * microbatch + microbatch]),
                 )
             )
 
@@ -709,7 +710,7 @@ class T5Stack(nn.Module):
             # dispatch process
             forward_buffer_stacks_1st[i] = self.dispatcher.submit(
                 lambda: _run_with_no_grad(
-                    self.forward_mid, 
+                    self.forward_mid,
                     hidden_states=forward_buffer_first[i][0],
                     attention_mask=forward_buffer_first[i][1],
                     position_bias=None,
@@ -719,15 +720,18 @@ class T5Stack(nn.Module):
 
             # second stack forward
             # materialize resnet activation
-            forward_buffer_stacks_1st[i] = self.transfer_ops(next(self.block[12].parameters()).device, *forward_buffer_stacks_1st[i].result())
+            forward_buffer_stacks_1st[i] = self.transfer_ops(
+                next(self.block[12].parameters()).device,
+                *forward_buffer_stacks_1st[i].result(),
+            )
             # dispatch process
             forward_buffer_stacks_2nd[i] = self.dispatcher.submit(
                 lambda: _run_with_no_grad(
-                    self.forward_mid, 
+                    self.forward_mid,
                     hidden_states=forward_buffer_stacks_1st[i][0],
                     attention_mask=forward_buffer_stacks_1st[i][1],
                     position_bias=forward_buffer_stacks_1st[i][2],
-                    layer_slice=(12, 24)
+                    layer_slice=(12, 24),
                 )
             )
 
@@ -740,7 +744,6 @@ class T5Stack(nn.Module):
                     hidden_states=forward_buffer_stacks_2nd[i][0],
                 )
             )
-
 
             # flush pipeline queue
             del forward_buffer_first[i]

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import torch
 from einops import rearrange
 from torch import Tensor, nn
+import torch.nn.functional as F
 
 from ..math import attention, rope
 
@@ -36,9 +37,11 @@ def timestep_embedding(t: Tensor, dim, max_period=10000, time_factor: float = 10
     """
     t = time_factor * t
     half = dim // 2
-    freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half).to(
-        t.device
-    )
+    freqs = torch.exp(
+        -math.log(max_period)
+        * torch.arange(start=0, end=half, dtype=torch.float32)
+        / half
+    ).to(t.device)
 
     args = t[:, None].float() * freqs[None]
     embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
@@ -60,13 +63,13 @@ class MLPEmbedder(nn.Module):
     def device(self):
         # Get the device of the module (assumes all parameters are on the same device)
         return next(self.parameters()).device
-    
+
     def forward(self, x: Tensor) -> Tensor:
         return self.out_layer(self.silu(self.in_layer(x)))
 
 
 class RMSNorm(torch.nn.Module):
-    def __init__(self, dim: int, use_compiled:bool = False):
+    def __init__(self, dim: int, use_compiled: bool = False):
         super().__init__()
         self.scale = nn.Parameter(torch.ones(dim))
         self.use_compiled = use_compiled
@@ -76,17 +79,128 @@ class RMSNorm(torch.nn.Module):
         x = x.float()
         rrms = torch.rsqrt(torch.mean(x**2, dim=-1, keepdim=True) + 1e-6)
         return (x * rrms).to(dtype=x_dtype) * self.scale
-    
-    def forward(self, x: Tensor):
-        if self.use_compiled:
-            return torch.compile(self._forward)(x)
-        else:
-            return self._forward(x)
 
+    def forward(self, x: Tensor):
+        return F.rms_norm(x, self.scale.shape, weight=self.scale, eps=1e-6)
+        # if self.use_compiled:
+        #     return torch.compile(self._forward)(x)
+        # else:
+        #     return self._forward(x)
+
+
+def distribute_modulations(tensor: torch.Tensor):
+    """
+    Distributes slices of the tensor into the block_dict as ModulationOut objects.
+
+    Args:
+        tensor (torch.Tensor): Input tensor with shape [batch_size, vectors, dim].
+    """
+    batch_size, vectors, dim = tensor.shape
+
+    block_dict = {}
+
+    # HARD CODED VALUES! lookup table for the generated vectors
+    # TODO: move this into chroma config!
+    # Add 38 single mod blocks
+    for i in range(38):
+        key = f"single_blocks.{i}.modulation.lin"
+        block_dict[key] = None
+
+    # Add 19 image double blocks
+    for i in range(19):
+        key = f"double_blocks.{i}.img_mod.lin"
+        block_dict[key] = None
+
+    # Add 19 text double blocks
+    for i in range(19):
+        key = f"double_blocks.{i}.txt_mod.lin"
+        block_dict[key] = None
+
+    # Add the final layer
+    block_dict["final_layer.adaLN_modulation.1"] = None
+    # 6.2b version
+    block_dict["lite_double_blocks.4.img_mod.lin"] = None
+    block_dict["lite_double_blocks.4.txt_mod.lin"] = None
+
+    idx = 0  # Index to keep track of the vector slices
+
+    for key in block_dict.keys():
+        if "single_blocks" in key:
+            # Single block: 1 ModulationOut
+            block_dict[key] = ModulationOut(
+                shift=tensor[:, idx : idx + 1, :],
+                scale=tensor[:, idx + 1 : idx + 2, :],
+                gate=tensor[:, idx + 2 : idx + 3, :],
+            )
+            idx += 3  # Advance by 3 vectors
+
+        elif "img_mod" in key:
+            # Double block: List of 2 ModulationOut
+            double_block = []
+            for _ in range(2):  # Create 2 ModulationOut objects
+                double_block.append(
+                    ModulationOut(
+                        shift=tensor[:, idx : idx + 1, :],
+                        scale=tensor[:, idx + 1 : idx + 2, :],
+                        gate=tensor[:, idx + 2 : idx + 3, :],
+                    )
+                )
+                idx += 3  # Advance by 3 vectors per ModulationOut
+            block_dict[key] = double_block
+
+        elif "txt_mod" in key:
+            # Double block: List of 2 ModulationOut
+            double_block = []
+            for _ in range(2):  # Create 2 ModulationOut objects
+                double_block.append(
+                    ModulationOut(
+                        shift=tensor[:, idx : idx + 1, :],
+                        scale=tensor[:, idx + 1 : idx + 2, :],
+                        gate=tensor[:, idx + 2 : idx + 3, :],
+                    )
+                )
+                idx += 3  # Advance by 3 vectors per ModulationOut
+            block_dict[key] = double_block
+
+        elif "final_layer" in key:
+            # Final layer: 1 ModulationOut
+            block_dict[key] = [
+                tensor[:, idx : idx + 1, :],
+                tensor[:, idx + 1 : idx + 2, :],
+            ]
+            idx += 2  # Advance by 3 vectors
+
+    return block_dict
+
+
+class Approximator(nn.Module):
+    def __init__(self, in_dim: int, out_dim: int, hidden_dim: int, n_layers=4):
+        super().__init__()
+        self.in_proj = nn.Linear(in_dim, hidden_dim, bias=True)
+        self.layers = nn.ModuleList(
+            [MLPEmbedder(hidden_dim, hidden_dim) for x in range(n_layers)]
+        )
+        self.norms = nn.ModuleList([RMSNorm(hidden_dim) for x in range(n_layers)])
+        self.out_proj = nn.Linear(hidden_dim, out_dim)
+
+    @property
+    def device(self):
+        # Get the device of the module (assumes all parameters are on the same device)
+        return next(self.parameters()).device
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = self.in_proj(x)
+
+        for layer, norms in zip(self.layers, self.norms):
+            x = x + layer(norms(x))
+
+        x = self.out_proj(x)
+
+        return x
 
 
 class QKNorm(torch.nn.Module):
-    def __init__(self, dim: int, use_compiled:bool = False):
+    def __init__(self, dim: int, use_compiled: bool = False):
         super().__init__()
         self.query_norm = RMSNorm(dim, use_compiled=use_compiled)
         self.key_norm = RMSNorm(dim, use_compiled=use_compiled)
@@ -99,7 +213,13 @@ class QKNorm(torch.nn.Module):
 
 
 class SelfAttention(nn.Module):
-    def __init__(self, dim: int, num_heads: int = 8, qkv_bias: bool = False, use_compiled:bool = False):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int = 8,
+        qkv_bias: bool = False,
+        use_compiled: bool = False,
+    ):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -125,29 +245,6 @@ class ModulationOut:
     gate: Tensor
 
 
-class Modulation(nn.Module):
-    def __init__(self, dim: int, double: bool, use_compiled:bool = False):
-        super().__init__()
-        self.is_double = double
-        self.multiplier = 6 if double else 3
-        self.lin = nn.Linear(dim, self.multiplier * dim, bias=True)
-        self.use_compiled = use_compiled
-
-    def _forward(self, vec: Tensor) -> tuple[ModulationOut, ModulationOut | None]:
-        out = self.lin(nn.functional.silu(vec))[:, None, :].chunk(self.multiplier, dim=-1)
-
-        return (
-            ModulationOut(*out[:3]),
-            ModulationOut(*out[3:]) if self.is_double else None,
-        )
-    
-    def forward(self, vec: Tensor) -> tuple[ModulationOut, ModulationOut | None]:
-        if self.use_compiled:
-            return torch.compile(self._forward)(vec)
-        else:
-            return self._forward(vec)
-
-
 def _modulation_shift_scale_fn(x, scale, shift):
     return (1 + scale) * x + shift
 
@@ -157,15 +254,26 @@ def _modulation_gate_fn(x, gate, gate_params):
 
 
 class DoubleStreamBlock(nn.Module):
-    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float, qkv_bias: bool = False, use_compiled:bool = False):
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        mlp_ratio: float,
+        qkv_bias: bool = False,
+        use_compiled: bool = False,
+    ):
         super().__init__()
 
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.num_heads = num_heads
         self.hidden_size = hidden_size
-        self.img_mod = Modulation(hidden_size, double=True, use_compiled=use_compiled)
         self.img_norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.img_attn = SelfAttention(dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias, use_compiled=use_compiled)
+        self.img_attn = SelfAttention(
+            dim=hidden_size,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            use_compiled=use_compiled,
+        )
 
         self.img_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.img_mlp = nn.Sequential(
@@ -174,9 +282,13 @@ class DoubleStreamBlock(nn.Module):
             nn.Linear(mlp_hidden_dim, hidden_size, bias=True),
         )
 
-        self.txt_mod = Modulation(hidden_size, double=True, use_compiled=use_compiled)
         self.txt_norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.txt_attn = SelfAttention(dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias, use_compiled=use_compiled)
+        self.txt_attn = SelfAttention(
+            dim=hidden_size,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            use_compiled=use_compiled,
+        )
 
         self.txt_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.txt_mlp = nn.Sequential(
@@ -196,33 +308,47 @@ class DoubleStreamBlock(nn.Module):
             return torch.compile(_modulation_shift_scale_fn)(x, scale, shift)
         else:
             return _modulation_shift_scale_fn(x, scale, shift)
-        
+
     def modulation_gate_fn(self, x, gate, gate_params):
         if self.use_compiled:
             return torch.compile(_modulation_gate_fn)(x, gate, gate_params)
         else:
             return _modulation_gate_fn(x, gate, gate_params)
 
-    def forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor) -> tuple[Tensor, Tensor]:
-        img_mod1, img_mod2 = self.img_mod(vec)
-        txt_mod1, txt_mod2 = self.txt_mod(vec)
+    def forward(
+        self,
+        img: Tensor,
+        txt: Tensor,
+        vec: Tensor,
+        pe: Tensor,
+        distill_vec: list[ModulationOut],
+    ) -> tuple[Tensor, Tensor]:
+        (img_mod1, img_mod2), (txt_mod1, txt_mod2) = distill_vec
 
         # prepare image for attention
         img_modulated = self.img_norm1(img)
         # replaced with compiled fn
         # img_modulated = (1 + img_mod1.scale) * img_modulated + img_mod1.shift
-        img_modulated = self.modulation_shift_scale_fn(img_modulated, img_mod1.scale, img_mod1.shift)
+        img_modulated = self.modulation_shift_scale_fn(
+            img_modulated, img_mod1.scale, img_mod1.shift
+        )
         img_qkv = self.img_attn.qkv(img_modulated)
-        img_q, img_k, img_v = rearrange(img_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+        img_q, img_k, img_v = rearrange(
+            img_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads
+        )
         img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
 
         # prepare txt for attention
         txt_modulated = self.txt_norm1(txt)
         # replaced with compiled fn
         # txt_modulated = (1 + txt_mod1.scale) * txt_modulated + txt_mod1.shift
-        txt_modulated = self.modulation_shift_scale_fn(txt_modulated, txt_mod1.scale, txt_mod1.shift)
+        txt_modulated = self.modulation_shift_scale_fn(
+            txt_modulated, txt_mod1.scale, txt_mod1.shift
+        )
         txt_qkv = self.txt_attn.qkv(txt_modulated)
-        txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+        txt_q, txt_k, txt_v = rearrange(
+            txt_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads
+        )
         txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
 
         # run actual attention
@@ -239,11 +365,13 @@ class DoubleStreamBlock(nn.Module):
         # img = img + img_mod2.gate * self.img_mlp((1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift)
         img = self.modulation_gate_fn(img, img_mod1.gate, self.img_attn.proj(img_attn))
         img = self.modulation_gate_fn(
-            img, 
-            img_mod2.gate, 
+            img,
+            img_mod2.gate,
             self.img_mlp(
-                self.modulation_shift_scale_fn(self.img_norm2(img), img_mod2.scale, img_mod2.shift)
-            )
+                self.modulation_shift_scale_fn(
+                    self.img_norm2(img), img_mod2.scale, img_mod2.shift
+                )
+            ),
         )
 
         # calculate the txt bloks
@@ -252,11 +380,13 @@ class DoubleStreamBlock(nn.Module):
         # txt = txt + txt_mod2.gate * self.txt_mlp((1 + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift)
         txt = self.modulation_gate_fn(txt, txt_mod1.gate, self.txt_attn.proj(txt_attn))
         txt = self.modulation_gate_fn(
-            txt, 
-            txt_mod2.gate, 
+            txt,
+            txt_mod2.gate,
             self.txt_mlp(
-                self.modulation_shift_scale_fn(self.txt_norm2(txt), txt_mod2.scale, txt_mod2.shift)
-            )
+                self.modulation_shift_scale_fn(
+                    self.txt_norm2(txt), txt_mod2.scale, txt_mod2.shift
+                )
+            ),
         )
 
         return img, txt
@@ -274,7 +404,7 @@ class SingleStreamBlock(nn.Module):
         num_heads: int,
         mlp_ratio: float = 4.0,
         qk_scale: float | None = None,
-        use_compiled:bool = False,
+        use_compiled: bool = False,
     ):
         super().__init__()
         self.hidden_dim = hidden_size
@@ -294,7 +424,6 @@ class SingleStreamBlock(nn.Module):
         self.pre_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
 
         self.mlp_act = nn.GELU(approximate="tanh")
-        self.modulation = Modulation(hidden_size, double=False, use_compiled=use_compiled)
         self.use_compiled = use_compiled
 
     @property
@@ -307,19 +436,23 @@ class SingleStreamBlock(nn.Module):
             return torch.compile(_modulation_shift_scale_fn)(x, scale, shift)
         else:
             return _modulation_shift_scale_fn(x, scale, shift)
-        
+
     def modulation_gate_fn(self, x, gate, gate_params):
         if self.use_compiled:
             return torch.compile(_modulation_gate_fn)(x, gate, gate_params)
         else:
             return _modulation_gate_fn(x, gate, gate_params)
-        
-    def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
-        mod, _ = self.modulation(vec)
+
+    def forward(
+        self, x: Tensor, vec: Tensor, pe: Tensor, distill_vec: list[ModulationOut]
+    ) -> Tensor:
+        mod = distill_vec
         # replaced with compiled fn
         # x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
         x_mod = self.modulation_shift_scale_fn(self.pre_norm(x), mod.scale, mod.shift)
-        qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1)
+        qkv, mlp = torch.split(
+            self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1
+        )
 
         q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
         q, k = self.norm(q, k, v)
@@ -334,28 +467,40 @@ class SingleStreamBlock(nn.Module):
 
 
 class LastLayer(nn.Module):
-    def __init__(self, hidden_size: int, patch_size: int, out_channels: int, use_compiled:bool = False):
+    def __init__(
+        self,
+        hidden_size: int,
+        patch_size: int,
+        out_channels: int,
+        use_compiled: bool = False,
+    ):
         super().__init__()
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True)
-        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True))
+        self.linear = nn.Linear(
+            hidden_size, patch_size * patch_size * out_channels, bias=True
+        )
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True)
+        )
         self.use_compiled = use_compiled
 
     @property
     def device(self):
         # Get the device of the module (assumes all parameters are on the same device)
         return next(self.parameters()).device
-    
+
     def modulation_shift_scale_fn(self, x, scale, shift):
         if self.use_compiled:
             return torch.compile(_modulation_shift_scale_fn)(x, scale, shift)
         else:
             return _modulation_shift_scale_fn(x, scale, shift)
-        
-    def forward(self, x: Tensor, vec: Tensor) -> Tensor:
-        shift, scale = self.adaLN_modulation(vec).chunk(2, dim=1)
+
+    def forward(self, x: Tensor, vec: Tensor, distill_vec: list[Tensor]) -> Tensor:
+        shift, scale = distill_vec
         # replaced with compiled fn
         # x = (1 + scale[:, None, :]) * self.norm_final(x) + shift[:, None, :]
-        x = self.modulation_shift_scale_fn(self.norm_final(x), scale[:, None, :], shift[:, None, :])
+        x = self.modulation_shift_scale_fn(
+            self.norm_final(x), scale[:, None, :], shift[:, None, :]
+        )
         x = self.linear(x)
         return x
