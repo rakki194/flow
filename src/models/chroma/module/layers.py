@@ -319,7 +319,6 @@ class DoubleStreamBlock(nn.Module):
         self,
         img: Tensor,
         txt: Tensor,
-        vec: Tensor,
         pe: Tensor,
         distill_vec: list[ModulationOut],
     ) -> tuple[Tensor, Tensor]:
@@ -444,7 +443,7 @@ class SingleStreamBlock(nn.Module):
             return _modulation_gate_fn(x, gate, gate_params)
 
     def forward(
-        self, x: Tensor, vec: Tensor, pe: Tensor, distill_vec: list[ModulationOut]
+        self, x: Tensor, pe: Tensor, distill_vec: list[ModulationOut]
     ) -> Tensor:
         mod = distill_vec
         # replaced with compiled fn
@@ -479,9 +478,6 @@ class LastLayer(nn.Module):
         self.linear = nn.Linear(
             hidden_size, patch_size * patch_size * out_channels, bias=True
         )
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True)
-        )
         self.use_compiled = use_compiled
 
     @property
@@ -495,8 +491,10 @@ class LastLayer(nn.Module):
         else:
             return _modulation_shift_scale_fn(x, scale, shift)
 
-    def forward(self, x: Tensor, vec: Tensor, distill_vec: list[Tensor]) -> Tensor:
+    def forward(self, x: Tensor, distill_vec: list[Tensor]) -> Tensor:
         shift, scale = distill_vec
+        shift = shift.squeeze(1)
+        scale = scale.squeeze(1)
         # replaced with compiled fn
         # x = (1 + scale[:, None, :]) * self.norm_final(x) + shift[:, None, :]
         x = self.modulation_shift_scale_fn(

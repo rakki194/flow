@@ -18,6 +18,19 @@ class AutoEncoderParams:
     shift_factor: float
 
 
+ae_params=AutoEncoderParams(
+    resolution=256,
+    in_channels=3,
+    ch=128,
+    out_ch=3,
+    ch_mult=[1, 2, 4, 4],
+    num_res_blocks=2,
+    z_channels=16,
+    scale_factor=0.3611,
+    shift_factor=0.1159,
+)
+
+
 def swish(x: Tensor) -> Tensor:
     return x * torch.sigmoid(x)
 

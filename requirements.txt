@@ -9,3 +9,7 @@ wandb
 einops
 pillow-jxl-plugin
 transformers
+safetensors
+sentencepiece
+bitsandbytes
+torchastic

@@ -147,7 +147,7 @@ class Quantized4BitLinearWithLoRA(nn.Module):
 
 
 class Quantized8bitLinear(nn.Module):
-    def __init__(self, linear, quant=torch.float8_e4m3fn):
+    def __init__(self, linear, quant=torch.float8_e4m3fn, device="cpu"):
         super().__init__()
         assert quant in {
             torch.float8_e4m3fn,
@@ -156,9 +156,9 @@ class Quantized8bitLinear(nn.Module):
             torch.float8_e5m2fnuz,
         }, "Unknown quantization"
 
-        self.linear_weight = linear.weight.to(dtype=quant)
+        self.linear_weight = linear.weight.to(dtype=quant, device=device)
         if linear.bias is not None:
-            self.linear_bias = linear.bias.to(dtype=quant)
+            self.linear_bias = linear.bias.to(dtype=quant, device=device)
         else:
             self.linear_bias = None
 

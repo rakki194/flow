@@ -18,7 +18,6 @@ from .module.layers import (
 @dataclass
 class ChromaParams:
     in_channels: int
-    # vec_in_dim: int
     context_in_dim: int
     hidden_size: int
     mlp_ratio: float
@@ -38,7 +37,6 @@ class ChromaParams:
 chroma_params = (
     ChromaParams(
         in_channels=64,
-        vec_in_dim=768,
         context_in_dim=4096,
         hidden_size=3072,
         mlp_ratio=4.0,
@@ -53,7 +51,7 @@ chroma_params = (
         approximator_depth=5,
         approximator_hidden_size=5120,
         _use_compiled=False,
-    ),
+    )
 )
 
 
@@ -127,7 +125,14 @@ class Chroma(nn.Module):
 
         # TODO: move this hardcoded value to config
         self.mod_index_length = 344
-        self.mod_index = torch.tensor(list(range(self.mod_index_length)))
+        # self.mod_index = torch.tensor(list(range(self.mod_index_length)))
+        self.register_buffer('mod_index', torch.tensor(list(range(self.mod_index_length)), device='cpu'), persistent=False)
+
+
+    @property
+    def device(self):
+        # Get the device of the module (assumes all parameters are on the same device)
+        return next(self.parameters()).device
 
     def forward(
         self,
