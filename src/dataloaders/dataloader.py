@@ -54,6 +54,8 @@ class TextImageDataset(Dataset):
         self.uncond_percentage = uncond_percentage
         self.num_gpus = num_gpus
         self.rank = rank
+        self.rank_batch_size = batch_size // num_gpus
+        assert (batch_size % num_gpus) == 0, "batch size is not divisible by the number of GPUs!"
 
         random.seed(seed)
         # just simple pil image to tensor conversion
@@ -178,18 +180,25 @@ class TextImageDataset(Dataset):
     def get_batches(self):
         return self.batches
 
+    # def _round_robin(self):
+    #     # reason we do round robbin here instead of classic torch distributed batch is because
+    #     # we have bucketing and the shape is different for each gpu
+    #     # drop last batch
+    #     self.batches = self.batches[
+    #         : len(self.batches) - len(self.batches) % self.num_gpus
+    #     ]
+    #     # slice round-robin
+    #     subset_for_this_worker = []
+    #     for i in range(0, len(self.batches), self.num_gpus):
+    #         subset_for_this_worker.append(self.batches[i + self.rank])
+    #         # print(i + self.rank)
+    #     self.batches = subset_for_this_worker
+
     def _round_robin(self):
-        # reason we do round robbin here instead of classic torch distributed batch is because
-        # we have bucketing and the shape is different for each gpu
-        # drop last batch
-        self.batches = self.batches[
-            : len(self.batches) - len(self.batches) % self.num_gpus
-        ]
         # slice round-robin
         subset_for_this_worker = []
-        for i in range(0, len(self.batches), self.num_gpus):
-            subset_for_this_worker.append(self.batches[i + self.rank])
-            # print(i + self.rank)
+        for batch in self.batches:
+            subset_for_this_worker.append(batch[self.rank * self.rank_batch_size : self.rank * self.rank_batch_size + self.rank_batch_size])
         self.batches = subset_for_this_worker
 
     # </some utility method here>
