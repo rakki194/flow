@@ -48,7 +48,6 @@ class TextImageDataset(Dataset):
         self.ratio_cutoff = ratio_cutoff
         self.resolution_step = resolution_step
         self.image_folder_path = image_folder_path
-        self.batch_size = batch_size
         self.tag_drop_percentage = tag_drop_percentage
         self.tag_based = tag_based
         self.uncond_percentage = uncond_percentage
@@ -279,9 +278,9 @@ class TextImageDataset(Dataset):
                 training_prompts.append(sample["caption_or_tags"])
 
         # echo short batch
-        if self.batch_size > 1:
-            while len(images) < self.batch_size:
-                log.info(f"only {len(images)} out of {self.batch_size} exist, echoing")
+        if self.rank_batch_size > 1:
+            while len(images) < self.rank_batch_size:
+                log.info(f"only {len(images)} out of {self.rank_batch_size} exist, echoing")
                 echoed_index = random.choice(list(range(len(images))))
                 images.append(images[echoed_index])
                 training_prompts.append(training_prompts[echoed_index])
