@@ -4,6 +4,7 @@ import torch.nn as nn
 from einops import rearrange
 import torch.nn.functional as F
 
+
 def calculate_shift(
     image_seq_len,
     base_seq_len: int = 256,

@@ -83,13 +83,11 @@ def save_file_multipart(
 
 
 def load_safetensors(file_path: str, device: str = "cpu"):
-
     statedict = {}
 
     with safe_open(file_path, framework="pt", device=device) as f:
         # Iterate over all keys and select layers that match the criteria
         for layer_name in f.keys():
-
             statedict[layer_name] = f.get_tensor(layer_name)
 
     return statedict
@@ -114,7 +112,12 @@ def load_selected_keys(filename, exclude_keywords=[]):
     return tensors
 
 
-def load_layers_by_keywords_from_safetensors(file_path: str, include_keywords: list[str], exclude_keywords: list[str] = None, device: str = "cpu"):
+def load_layers_by_keywords_from_safetensors(
+    file_path: str,
+    include_keywords: list[str],
+    exclude_keywords: list[str] = None,
+    device: str = "cpu",
+):
     """
     Load specific layers from a .safetensors file based on keyword lists, including and excluding layers.
 
@@ -133,13 +136,19 @@ def load_layers_by_keywords_from_safetensors(file_path: str, include_keywords: l
         # Iterate over all keys and select layers that match the criteria
         for layer_name in f.keys():
             include_match = any(keyword in layer_name for keyword in include_keywords)
-            exclude_match = any(keyword in layer_name for keyword in exclude_keywords or [])  # Handle empty exclude_keywords list
+            exclude_match = any(
+                keyword in layer_name for keyword in exclude_keywords or []
+            )  # Handle empty exclude_keywords list
             if include_match and not exclude_match:
                 matched_layers_state_dict[layer_name] = f.get_tensor(layer_name)
 
     if not matched_layers_state_dict:
-        print(f"No layers found matching the include keywords {include_keywords} and not the exclude keywords {exclude_keywords} in the safetensors file.")
+        print(
+            f"No layers found matching the include keywords {include_keywords} and not the exclude keywords {exclude_keywords} in the safetensors file."
+        )
     else:
-        print(f"Loaded {len(matched_layers_state_dict)} layers matching the include keywords {include_keywords} and not {exclude_keywords}.")
+        print(
+            f"Loaded {len(matched_layers_state_dict)} layers matching the include keywords {include_keywords} and not {exclude_keywords}."
+        )
 
     return matched_layers_state_dict

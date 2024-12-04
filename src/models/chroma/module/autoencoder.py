@@ -18,7 +18,7 @@ class AutoEncoderParams:
     shift_factor: float
 
 
-ae_params=AutoEncoderParams(
+ae_params = AutoEncoderParams(
     resolution=256,
     in_channels=3,
     ch=128,

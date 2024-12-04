@@ -34,24 +34,22 @@ class ChromaParams:
     _use_compiled: bool
 
 
-chroma_params = (
-    ChromaParams(
-        in_channels=64,
-        context_in_dim=4096,
-        hidden_size=3072,
-        mlp_ratio=4.0,
-        num_heads=24,
-        depth=19,
-        depth_single_blocks=38,
-        axes_dim=[16, 56, 56],
-        theta=10_000,
-        qkv_bias=True,
-        guidance_embed=True,
-        approximator_in_dim=64,
-        approximator_depth=5,
-        approximator_hidden_size=5120,
-        _use_compiled=False,
-    )
+chroma_params = ChromaParams(
+    in_channels=64,
+    context_in_dim=4096,
+    hidden_size=3072,
+    mlp_ratio=4.0,
+    num_heads=24,
+    depth=19,
+    depth_single_blocks=38,
+    axes_dim=[16, 56, 56],
+    theta=10_000,
+    qkv_bias=True,
+    guidance_embed=True,
+    approximator_in_dim=64,
+    approximator_depth=5,
+    approximator_hidden_size=5120,
+    _use_compiled=False,
 )
 
 
@@ -125,9 +123,12 @@ class Chroma(nn.Module):
 
         # TODO: move this hardcoded value to config
         self.mod_index_length = 344
-        # self.mod_index = torch.tensor(list(range(self.mod_index_length)))
-        self.register_buffer('mod_index', torch.tensor(list(range(self.mod_index_length)), device='cpu'), persistent=False)
-
+        # self.mod_index = torch.tensor(list(range(self.mod_index_length)), device=0)
+        self.register_buffer(
+            "mod_index",
+            torch.tensor(list(range(self.mod_index_length)), device="cpu"),
+            persistent=False,
+        )
 
     @property
     def device(self):
@@ -150,24 +151,29 @@ class Chroma(nn.Module):
         img = self.img_in(img)
         txt = self.txt_in(txt)
 
-        # hardcoded value
-
-        distill_timestep = timestep_embedding(timesteps, 16)
-        # TODO: need to add toggle to omit this from schnell but that's not a priority
-        distil_guidance = timestep_embedding(guidance, 16)
-        # get all modulation index
-        modulation_index = timestep_embedding(self.mod_index, 32)
-        # we need to broadcast the modulation index here so each batch has all of the index
-        modulation_index = modulation_index.unsqueeze(0).repeat(img.shape[0], 1, 1)
-        # and we need to broadcast timestep and guidance along too
-        timestep_guidance = (
-            torch.cat([distill_timestep, distil_guidance], dim=1)
-            .unsqueeze(1)
-            .repeat(1, self.mod_index_length, 1)
-        )
-        # then and only then we could concatenate it together
-        input_vec = torch.cat([timestep_guidance, modulation_index], dim=-1)
-        mod_vectors = self.distilled_guidance_layer(input_vec)
+        # TODO:
+        # need to fix grad accumulation issue here for now it's in no grad mode
+        # besides, i don't want to wash out the PFP that's trained on this model weights anyway
+        # the fan out operation here is deleting the backward graph
+        # alternatively doing forward pass for every block manually is doable but slow
+        # custom backward probably be better
+        with torch.no_grad():
+            distill_timestep = timestep_embedding(timesteps, 16)
+            # TODO: need to add toggle to omit this from schnell but that's not a priority
+            distil_guidance = timestep_embedding(guidance, 16)
+            # get all modulation index
+            modulation_index = timestep_embedding(self.mod_index, 32)
+            # we need to broadcast the modulation index here so each batch has all of the index
+            modulation_index = modulation_index.unsqueeze(0).repeat(img.shape[0], 1, 1)
+            # and we need to broadcast timestep and guidance along too
+            timestep_guidance = (
+                torch.cat([distill_timestep, distil_guidance], dim=1)
+                .unsqueeze(1)
+                .repeat(1, self.mod_index_length, 1)
+            )
+            # then and only then we could concatenate it together
+            input_vec = torch.cat([timestep_guidance, modulation_index], dim=-1)
+            mod_vectors = self.distilled_guidance_layer(input_vec.requires_grad_(True))
         mod_vectors_dict = distribute_modulations(mod_vectors)
 
         ids = torch.cat((txt_ids, img_ids), dim=1)

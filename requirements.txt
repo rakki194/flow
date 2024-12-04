@@ -13,3 +13,4 @@ safetensors
 sentencepiece
 bitsandbytes
 torchastic
+torch-linear-assignment

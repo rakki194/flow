@@ -6,6 +6,7 @@ from tqdm import tqdm
 
 csv.field_size_limit(sys.maxsize)
 
+
 def save_as_jsonl(data, filename):
     """Saves a list of dictionaries as a JSONL file.
 

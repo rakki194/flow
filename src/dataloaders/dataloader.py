@@ -54,7 +54,9 @@ class TextImageDataset(Dataset):
         self.num_gpus = num_gpus
         self.rank = rank
         self.rank_batch_size = batch_size // num_gpus
-        assert (batch_size % num_gpus) == 0, "batch size is not divisible by the number of GPUs!"
+        assert (
+            batch_size % num_gpus
+        ) == 0, "batch size is not divisible by the number of GPUs!"
 
         random.seed(seed)
         # just simple pil image to tensor conversion
@@ -197,7 +199,12 @@ class TextImageDataset(Dataset):
         # slice round-robin
         subset_for_this_worker = []
         for batch in self.batches:
-            subset_for_this_worker.append(batch[self.rank * self.rank_batch_size : self.rank * self.rank_batch_size + self.rank_batch_size])
+            subset_for_this_worker.append(
+                batch[
+                    self.rank * self.rank_batch_size : self.rank * self.rank_batch_size
+                    + self.rank_batch_size
+                ]
+            )
         self.batches = subset_for_this_worker
 
     # </some utility method here>
@@ -280,7 +287,9 @@ class TextImageDataset(Dataset):
         # echo short batch
         if self.rank_batch_size > 1:
             while len(images) < self.rank_batch_size:
-                log.info(f"only {len(images)} out of {self.rank_batch_size} exist, echoing")
+                log.info(
+                    f"only {len(images)} out of {self.rank_batch_size} exist, echoing"
+                )
                 echoed_index = random.choice(list(range(len(images))))
                 images.append(images[echoed_index])
                 training_prompts.append(training_prompts[echoed_index])
