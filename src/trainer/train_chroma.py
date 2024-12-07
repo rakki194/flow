@@ -14,6 +14,7 @@ from torchvision.utils import save_image, make_grid
 from torch.utils.data import DataLoader
 
 from torchastic import Compass, StochasticAccumulator
+import random
 
 from transformers import T5Tokenizer
 
@@ -39,8 +40,15 @@ class TrainingConfig:
     master_seed: int
     cache_minibatch: int
     train_minibatch: int
-    trained_layer_keywords: list[str]
     offload_param_count: int
+    lr: float
+    weight_decay: float
+    warmup_steps: int
+    change_layer_every: int
+    trained_single_blocks: int
+    trained_double_blocks: int
+    save_every: int
+    save_folder: str
 
 
 @dataclass
@@ -112,6 +120,82 @@ def prepare_sot_pairings(latents):
     return noisy_latents, target, input_timestep, image_pos_id, latent_shape
 
 
+def init_optimizer(model, trained_layer_keywords, lr, wd, warmup_steps):
+    # TODO: pack this into a function
+    trained_params = []
+    for name, param in model.named_parameters():
+        if any(keyword in name for keyword in trained_layer_keywords):
+            param.requires_grad = True
+            trained_params.append((name, param))
+        else:
+            param.requires_grad = False  # Optionally disable grad for others
+    # return hooks so it can be released later on
+    hooks = StochasticAccumulator.assign_hooks(model)
+    # init optimizer
+    optimizer = Compass(
+        [
+            {
+                "params": [
+                    param
+                    for name, param in trained_params
+                    if ("bias" not in name and "norm" not in name)
+                ]
+            },
+            {
+                "params": [
+                    param
+                    for name, param in trained_params
+                    if ("bias" in name or "norm" in name)
+                ],
+                "weight_decay": 0.0,
+            },
+        ],
+        lr=lr,
+        weight_decay=wd,
+        betas=(0.9, 0.999),
+    )
+
+    scheduler = torch.optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor=0.05,
+        end_factor=1.0,
+        total_iters=warmup_steps,
+    )
+
+    return optimizer, scheduler, hooks, trained_params
+
+
+def synchronize_gradients(model, scale=1):
+    for param in model.parameters():
+        if param.grad is not None:
+            # Synchronize gradients by summing across all processes
+            dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+            # Average the gradients if needed
+            if scale > 1:
+                param.grad /= scale
+
+
+def optimizer_state_to(optimizer, device):
+    for param, state in optimizer.state.items():
+        for key, value in state.items():
+            # Check if the item is a tensor
+            if isinstance(value, torch.Tensor): 
+                state[key] = value.to(device)
+
+
+def save_part(model, trained_layer_keywords, counter, save_folder):
+
+    os.makedirs(save_folder, exist_ok=True)
+    full_state_dict = model.state_dict()
+
+    filtered_state_dict = {}
+    for k, v in full_state_dict.items():
+        if any(keyword in k for keyword in trained_layer_keywords):
+            filtered_state_dict[k] = v
+
+    torch.save(filtered_state_dict, os.path.join(save_folder, f"trained_part_{counter}.pth"))
+
+
 def train_chroma(rank, world_size, debug=False):
     # Initialize distributed training
     if not debug:
@@ -131,15 +215,21 @@ def train_chroma(rank, world_size, debug=False):
         cache_minibatch=2,
         train_minibatch=1,
         offload_param_count=6000000000,
-        trained_layer_keywords=[f"double_blocks.{x}" for x in range(14, 15)]
-        + [f"single_blocks.{x}" for x in range(6, 8)],
+        trained_single_blocks=4,
+        trained_double_blocks=4,
+        weight_decay=0.0001,
+        lr=1e-5,
+        warmup_steps=1,
+        change_layer_every=3,
+        save_every=6,
+        save_folder="testing"
     )
 
     dataloader_config = DataloaderConfig(
-        batch_size=8,
+        batch_size=4,
         jsonl_metadata_path="test_raw_data.jsonl",
         image_folder_path="furry_50k_4o/images",
-        base_resolution=[512],
+        base_resolution=[1024],
         tag_based=True,
         tag_drop_percentage=0.2,
         uncond_percentage=0.1,
@@ -149,6 +239,7 @@ def train_chroma(rank, world_size, debug=False):
     )
     # global training RNG
     torch.manual_seed(training_config.master_seed)
+    random.seed(training_config.master_seed)
 
     # load model
     with torch.no_grad():
@@ -157,14 +248,14 @@ def train_chroma(rank, world_size, debug=False):
             model = Chroma(chroma_params)
         model.load_state_dict(load_safetensors(model_config.chroma_path), assign=True)
 
-        for name, param in model.named_parameters():
-            if any(
-                keyword in name for keyword in training_config.trained_layer_keywords
-            ):
-                param.requires_grad = True
-            else:
-                param.requires_grad = False  # Optionally disable grad for others
-        StochasticAccumulator.assign_hooks(model)
+        # randomly train inner layers at a time
+        trained_double_blocks = list(range(len(model.double_blocks)))
+        trained_single_blocks = list(range(len(model.single_blocks)))
+        random.shuffle(trained_double_blocks)
+        random.shuffle(trained_single_blocks)
+        # lazy :P
+        trained_double_blocks = trained_double_blocks * 1000000
+        trained_single_blocks = trained_single_blocks * 1000000
 
         # load ae
         with torch.device("meta"):
@@ -212,7 +303,45 @@ def train_chroma(rank, world_size, debug=False):
 
     os.makedirs("preview", exist_ok=True)
 
+    optimizer = None
+    scheduler = None
+    hooks = []
+    optimizer_counter = 0
     for counter, data in tqdm(enumerate(dataloader), total=len(dataset)):
+
+        if counter % training_config.change_layer_every == 0:
+            # periodically remove the optimizer and swap it with new one
+
+            # aliasing to make it cleaner
+            o_c = optimizer_counter
+            n_ls = training_config.trained_single_blocks
+            n_ld = training_config.trained_double_blocks
+            trained_layer_keywords = (
+                [
+                    f"double_blocks.{x}."
+                    for x in trained_double_blocks[o_c * n_ld : o_c * n_ld + n_ld]
+                ]
+                + [
+                    f"single_blocks.{x}."
+                    for x in trained_single_blocks[o_c * n_ls : o_c * n_ls + n_ls]
+                ]
+                + ["txt_in", "img_in", "final_layer"]
+            )
+
+            # remove hooks and load the new hooks
+            if len(hooks) != 0:
+                hooks = [hook.remove() for hook in hooks]
+
+            optimizer, scheduler, hooks, trained_params = init_optimizer(
+                model,
+                trained_layer_keywords,
+                training_config.lr,
+                training_config.weight_decay,
+                training_config.warmup_steps,
+            )
+
+            optimizer_counter += 1
+
         images, caption, index = data[0]
 
         print(images.shape)
@@ -312,109 +441,58 @@ def train_chroma(rank, world_size, debug=False):
         acc_embeddings.requires_grad_(True)
 
         ot_bs = acc_latents.shape[0]
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            # preview_images = []
-            for tmb_i in tqdm(
-                range(
-                    dataloader_config.batch_size
-                    // training_config.train_minibatch
-                    // world_size
-                )
-            ):
-                # do this inside for loops!
 
-                # NOTE: doing this one batch at a time but we can change it later
+        # aliasing
+        mb = training_config.train_minibatch
+        for tmb_i in tqdm(range(dataloader_config.batch_size // mb // world_size)):
+            # do this inside for loops!
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 pred = model(
-                    img=noisy_latents[
-                        tmb_i
-                        * training_config.train_minibatch : tmb_i
-                        * training_config.train_minibatch
-                        + training_config.train_minibatch
-                    ],
-                    img_ids=image_pos_id[
-                        tmb_i
-                        * training_config.train_minibatch : tmb_i
-                        * training_config.train_minibatch
-                        + training_config.train_minibatch
-                    ],
-                    txt=acc_embeddings[
-                        tmb_i
-                        * training_config.train_minibatch : tmb_i
-                        * training_config.train_minibatch
-                        + training_config.train_minibatch
-                    ].to(rank),
-                    txt_ids=text_ids[
-                        tmb_i
-                        * training_config.train_minibatch : tmb_i
-                        * training_config.train_minibatch
-                        + training_config.train_minibatch
-                    ],
-                    timesteps=input_timestep[
-                        tmb_i
-                        * training_config.train_minibatch : tmb_i
-                        * training_config.train_minibatch
-                        + training_config.train_minibatch
-                    ],
-                    guidance=static_guidance[
-                        tmb_i
-                        * training_config.train_minibatch : tmb_i
-                        * training_config.train_minibatch
-                        + training_config.train_minibatch
-                    ],
+                    img=noisy_latents[tmb_i * mb : tmb_i * mb + mb],
+                    img_ids=image_pos_id[tmb_i * mb : tmb_i * mb + mb],
+                    txt=acc_embeddings[tmb_i * mb : tmb_i * mb + mb].to(rank),
+                    txt_ids=text_ids[tmb_i * mb : tmb_i * mb + mb],
+                    timesteps=input_timestep[tmb_i * mb : tmb_i * mb + mb],
+                    guidance=static_guidance[tmb_i * mb : tmb_i * mb + mb],
                 )
+                # TODO: need to scale the loss with rank count and grad accum!
                 loss = F.mse_loss(
                     pred,
-                    target[
-                        tmb_i
-                        * training_config.train_minibatch : tmb_i
-                        * training_config.train_minibatch
-                        + training_config.train_minibatch
-                    ],
+                    target[tmb_i * mb : tmb_i * mb + mb],
                 )
-                loss.backward()
-
-                # check if the batching is correct
-
-                # with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                #     # debug preview
-                #     ae.to(rank)
-                #     preview_images.append(
-                #         ae.decode(
-                #             vae_unflatten(
-                #                 noisy_latents[tmb_i * training_config.train_minibatch: tmb_i * training_config.train_minibatch + training_config.train_minibatch],
-                #                 latent_shape
-                #             )
-                #         )
-                #     )
-
-            # preview_images = torch.cat(preview_images)
-            # save_image(make_grid(preview_images.clip(-1, 1)), f"preview_noisy/{counter}_{tmb_i}_rank_{rank}.jpg", normalize=True)
+            loss.backward()
 
         # offload some params to cpu just enough to make room for the caching process
         # and only offload non trainable params
         offload_param_count = 0
         for name, param in model.named_parameters():
             if not any(
-                keyword in name for keyword in training_config.trained_layer_keywords
+                keyword in name for keyword in trained_layer_keywords
             ):
                 if offload_param_count < training_config.offload_param_count:
                     offload_param_count += param.numel()
                     param.data = param.data.to("cpu")
+        torch.cuda.empty_cache()
 
-        images = []
-        with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            # debug preview
-            ae.to(rank)
-            for latent in tqdm(acc_latents):
-                images.append(ae.decode(latent.unsqueeze(0).to(rank)))
+        StochasticAccumulator.reassign_grad_buffer(model)
 
-        images = torch.cat(images)
-        save_image(
-            make_grid(images.clip(-1, 1)),
-            f"preview/{counter}_rank_{rank}.jpg",
-            normalize=True,
-        )
+        if not debug:
+            synchronize_gradients(model)
 
+        scheduler.step()
+        optimizer_state_to(optimizer, rank)
+        optimizer.step()
+        optimizer.zero_grad()
+
+        optimizer_state_to(optimizer, "cpu")
+        torch.cuda.empty_cache()
+
+        if (counter+1) % training_config.save_every == 0 and rank==0:
+            save_part(model, trained_layer_keywords, counter, training_config.save_folder)
+        if not debug:
+            dist.barrier()
+        
+        # flush
         acc_latents = []
         acc_embeddings = []
 

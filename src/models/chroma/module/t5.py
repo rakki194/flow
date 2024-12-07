@@ -591,18 +591,22 @@ class T5Stack(nn.Module):
                     layer_module,
                     hidden_states.to(device),
                     attention_mask.to(device),
-                    position_bias.to(device)
-                    if position_bias != None
-                    else position_bias,
+                    (
+                        position_bias.to(device)
+                        if position_bias != None
+                        else position_bias
+                    ),
                 )
                 pass
             else:
                 layer_outputs = layer_module(
                     hidden_states.to(device),
                     attention_mask=attention_mask.to(device),
-                    position_bias=position_bias.to(device)
-                    if position_bias != None
-                    else position_bias,
+                    position_bias=(
+                        position_bias.to(device)
+                        if position_bias != None
+                        else position_bias
+                    ),
                 )
 
             layer_outputs = layer_outputs[:1] + (None,) + layer_outputs[1:]
@@ -649,18 +653,22 @@ class T5Stack(nn.Module):
                     layer_module,
                     hidden_states.to(device),
                     attention_mask.to(device),
-                    position_bias.to(device)
-                    if position_bias != None
-                    else position_bias,
+                    (
+                        position_bias.to(device)
+                        if position_bias != None
+                        else position_bias
+                    ),
                 )
                 pass
             else:
                 layer_outputs = layer_module(
                     hidden_states.to(device),
                     attention_mask=attention_mask.to(device),
-                    position_bias=position_bias.to(device)
-                    if position_bias != None
-                    else position_bias,
+                    position_bias=(
+                        position_bias.to(device)
+                        if position_bias != None
+                        else position_bias
+                    ),
                 )
 
             layer_outputs = layer_outputs[:1] + (None,) + layer_outputs[1:]
