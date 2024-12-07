@@ -6,7 +6,7 @@ import os
 
 import torch
 from torch import nn
-from transformers import CLIPTokenizer, T5TokenizerFast
+from transformers import CLIPTokenizer, T5TokenizerFast, T5Tokenizer
 
 #################################################################################################
 ### Core/Utility
@@ -581,7 +581,7 @@ class T5XXLTokenizer(SDTokenizer):
     def __init__(self):
         super().__init__(
             pad_with_end=False,
-            tokenizer=T5TokenizerFast.from_pretrained("google/t5-v1_1-xxl"),
+            tokenizer=T5Tokenizer.from_pretrained("google/t5-v1_1-xxl"),
             has_start_token=False,
             pad_to_max_length=False,
             max_length=99999999,

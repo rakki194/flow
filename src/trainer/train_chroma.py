@@ -226,7 +226,7 @@ def train_chroma(rank, world_size, debug=False):
     )
 
     dataloader_config = DataloaderConfig(
-        batch_size=4,
+        batch_size=256,
         jsonl_metadata_path="test_raw_data.jsonl",
         image_folder_path="furry_50k_4o/images",
         base_resolution=[1024],

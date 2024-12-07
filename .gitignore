@@ -9,3 +9,6 @@ datasets
 *.jpg
 *.png
 *.jsonl
+*.pth
+/models
+scribble*

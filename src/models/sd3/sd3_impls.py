@@ -8,7 +8,7 @@ import torch
 from PIL import Image
 from tqdm import tqdm
 
-from mmditx import MMDiTX
+from .mmditx import MMDiTX
 
 #################################################################################################
 ### MMDiT Model Wrapping

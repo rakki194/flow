@@ -496,9 +496,14 @@ class DismantledBlock(nn.Module):
         assert x is not None, "pre_attention called with None input"
         if not self.pre_only:
             if not self.scale_mod_only:
-                shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
-                    self.adaLN_modulation(c).chunk(6, dim=1)
-                )
+                (
+                    shift_msa,
+                    scale_msa,
+                    gate_msa,
+                    shift_mlp,
+                    scale_mlp,
+                    gate_mlp,
+                ) = self.adaLN_modulation(c).chunk(6, dim=1)
             else:
                 shift_msa = None
                 shift_mlp = None

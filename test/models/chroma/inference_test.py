@@ -21,23 +21,25 @@ from torchvision.utils import make_grid, save_image
 
 MODEL_PATH = "models/flux/flux-dev.safetensors"
 GUIDANCE_PATH = "models/flux/universal_modulator_v2.1.safetensors"
+CHROMA_PATH = "models/flux/FLUX.1-schnell/chroma-8.9b.safetensors"
 VAE_PATH = "models/flux/ae.safetensors"
 T5_PATH = "models/flux/text_encoder_2"
 T5_CONFIG_PATH = "models/flux/text_encoder_2/config.json"
 T5_TOKENIZER_PATH = "models/flux/tokenizer_2"
 DEVICE = "cuda:1"
-T5_DEVICE = "cuda:1"
+T5_DEVICE = "cuda:0"
 
 # load model
 with torch.device("meta"):
     model = Chroma(chroma_params)
-state_dict_backbone = load_selected_keys(
-    MODEL_PATH, ["mod", "time_in", "guidance_in", "vector_in"]
-)
-guidance_backbone = load_safetensors(GUIDANCE_PATH)
-model.load_state_dict(state_dict_backbone, strict=False, assign=True)
-model.distilled_guidance_layer.load_state_dict(guidance_backbone, assign=True)
+# state_dict_backbone = load_selected_keys(
+#     MODEL_PATH, ["mod", "time_in", "guidance_in", "vector_in"]
+# )
+# guidance_backbone = load_safetensors(GUIDANCE_PATH)
+# model.load_state_dict(state_dict_backbone, strict=False, assign=True)
+# model.distilled_guidance_layer.load_state_dict(guidance_backbone, assign=True)
 # save_file(model.state_dict(), "models/flux/chroma_init.safetensors")
+model.load_state_dict(load_safetensors(CHROMA_PATH),  assign=True)
 model.to(DEVICE)
 # load ae
 with torch.device("meta"):
