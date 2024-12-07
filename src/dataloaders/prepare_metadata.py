@@ -18,9 +18,11 @@ def prepare_jsonl(
     for df in tqdm(pd.read_json(jsonl_path, lines=True, chunksize=chunksize)):
         for idx, data in df.iterrows():
             metadata = {
-                "filename": data[filename_col] + "." + data[ext_col]
-                if ext_col
-                else data[filename_col],
+                "filename": (
+                    data[filename_col] + "." + data[ext_col]
+                    if ext_col
+                    else data[filename_col]
+                ),
                 "caption_or_tags": data[caption_or_tags_col],
                 "buckets": [tuple(x) for x in data[[str(x) for x in bucket_col_list]]],
             }
