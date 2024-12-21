@@ -338,6 +338,10 @@ class AutoEncoder(nn.Module):
         self.scale_factor = params.scale_factor
         self.shift_factor = params.shift_factor
 
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
     def encode(self, x: Tensor) -> Tensor:
         z = self.reg(self.encoder(x))
         z = self.scale_factor * (z - self.shift_factor)

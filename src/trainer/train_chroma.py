@@ -52,6 +52,19 @@ class TrainingConfig:
 
 
 @dataclass
+class InferenceConfig:
+    inference_every: int
+    inference_folder: str
+    steps: int
+    guidance: int
+    cfg: int
+    prompts: list[str]
+    first_n_steps_wo_cfg: int
+    image_dim: tuple[int, int]
+    t5_max_length: int
+
+
+@dataclass
 class DataloaderConfig:
     batch_size: int
     jsonl_metadata_path: str
@@ -179,12 +192,11 @@ def optimizer_state_to(optimizer, device):
     for param, state in optimizer.state.items():
         for key, value in state.items():
             # Check if the item is a tensor
-            if isinstance(value, torch.Tensor): 
+            if isinstance(value, torch.Tensor):
                 state[key] = value.to(device)
 
 
 def save_part(model, trained_layer_keywords, counter, save_folder):
-
     os.makedirs(save_folder, exist_ok=True)
     full_state_dict = model.state_dict()
 
@@ -193,7 +205,101 @@ def save_part(model, trained_layer_keywords, counter, save_folder):
         if any(keyword in k for keyword in trained_layer_keywords):
             filtered_state_dict[k] = v
 
-    torch.save(filtered_state_dict, os.path.join(save_folder, f"trained_part_{counter}.pth"))
+    torch.save(
+        filtered_state_dict, os.path.join(save_folder, f"trained_part_{counter}.pth")
+    )
+
+
+def inference_wrapper(
+    model,
+    ae,
+    t5_tokenizer,
+    t5,
+    seed: int,
+    steps: int,
+    guidance: int,
+    cfg: int,
+    prompts: list,
+    rank: int,
+    first_n_steps_wo_cfg: int,
+    image_dim=(512, 512),
+    t5_max_length=512,
+):
+    #############################################################################
+    # test inference
+    # aliasing
+    SEED = seed
+    WIDTH = image_dim[0]
+    HEIGHT = image_dim[1]
+    STEPS = steps
+    GUIDANCE = guidance
+    CFG = cfg
+    FIRST_N_STEPS_WITHOUT_CFG = first_n_steps_wo_cfg
+    DEVICE = model.device
+    PROMPT = prompts
+
+    T5_MAX_LENGTH = t5_max_length
+
+    # store device state of each model
+    t5_device = t5.device
+    ae_device = ae.device
+    model_device = model.device
+    with torch.no_grad():
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            # init random noise
+            noise = get_noise(len(PROMPT), HEIGHT, WIDTH, DEVICE, torch.bfloat16, SEED)
+            noise, shape = vae_flatten(noise)
+            noise = noise.to(rank)
+            n, c, h, w = shape
+            image_pos_id = prepare_latent_image_ids(n, h, w).to(rank)
+
+            timesteps = get_schedule(STEPS, noise.shape[1])
+
+            model.to("cpu")
+            ae.to("cpu")
+            t5.to(rank)  # load t5 to gpu
+            text_inputs = t5_tokenizer(
+                PROMPT,
+                padding="max_length",
+                max_length=T5_MAX_LENGTH,
+                truncation=True,
+                return_length=False,
+                return_overflowing_tokens=False,
+                return_tensors="pt",
+            ).to(t5.device)
+
+            t5_embed = t5(text_inputs.input_ids).to(rank)
+            text_ids = torch.zeros((len(PROMPT), T5_MAX_LENGTH, 3), device=rank)
+
+            ae.to("cpu")
+            t5.to("cpu")
+            model.to(rank)  # load model to gpu
+            latent_cfg = denoise_cfg(
+                model,
+                noise,
+                image_pos_id,
+                t5_embed,
+                torch.zeros_like(t5_embed),
+                text_ids,
+                timesteps,
+                GUIDANCE,
+                CFG,
+                FIRST_N_STEPS_WITHOUT_CFG,
+            )
+
+            model.to("cpu")
+            t5.to("cpu")
+            ae.to(rank)  # load ae to gpu
+            output_image = ae.decode(vae_unflatten(latent_cfg, shape))
+
+            # restore back state
+            model.to("cpu")
+            t5.to("cpu")
+            ae.to("cpu")
+
+    # grid = make_grid(output_image, nrow=2, padding=2, normalize=True)
+
+    return output_image
 
 
 def train_chroma(rank, world_size, debug=False):
@@ -201,6 +307,7 @@ def train_chroma(rank, world_size, debug=False):
     if not debug:
         setup_distributed(rank, world_size)
 
+    ### ALL CONFIG IS HERE! ###
     model_config = ModelConfig(
         chroma_path="models/flux/FLUX.1-schnell/chroma-8.9b.safetensors",
         vae_path="models/flux/ae.safetensors",
@@ -214,7 +321,7 @@ def train_chroma(rank, world_size, debug=False):
         master_seed=0,
         cache_minibatch=2,
         train_minibatch=1,
-        offload_param_count=6000000000,
+        offload_param_count=5000000000,
         trained_single_blocks=4,
         trained_double_blocks=4,
         weight_decay=0.0001,
@@ -222,14 +329,14 @@ def train_chroma(rank, world_size, debug=False):
         warmup_steps=1,
         change_layer_every=3,
         save_every=6,
-        save_folder="testing"
+        save_folder="testing",
     )
 
     dataloader_config = DataloaderConfig(
-        batch_size=256,
+        batch_size=8,
         jsonl_metadata_path="test_raw_data.jsonl",
         image_folder_path="furry_50k_4o/images",
-        base_resolution=[1024],
+        base_resolution=[256],
         tag_based=True,
         tag_drop_percentage=0.2,
         uncond_percentage=0.1,
@@ -237,6 +344,23 @@ def train_chroma(rank, world_size, debug=False):
         num_workers=2,
         prefetch_factor=2,
     )
+
+    inference_config = InferenceConfig(
+        inference_every=2,
+        inference_folder="inference_folder",
+        steps=20,
+        guidance=3,
+        first_n_steps_wo_cfg=-1,
+        image_dim=(512, 512),
+        t5_max_length=512,
+        cfg=1,
+        prompts=[
+            "a cute cat sat on a mat while receiving a head pat from his owner called Matt",
+            # "baked potato, on the space floating orbiting around the earth",
+        ],
+    )
+
+    os.makedirs(inference_config.inference_folder, exist_ok=True)
     # global training RNG
     torch.manual_seed(training_config.master_seed)
     random.seed(training_config.master_seed)
@@ -307,8 +431,12 @@ def train_chroma(rank, world_size, debug=False):
     scheduler = None
     hooks = []
     optimizer_counter = 0
-    for counter, data in tqdm(enumerate(dataloader), total=len(dataset)):
-
+    for counter, data in tqdm(
+        enumerate(dataloader),
+        total=len(dataset),
+        desc=f"training, Rank {rank}",
+        position=rank,
+    ):
         if counter % training_config.change_layer_every == 0:
             # periodically remove the optimizer and swap it with new one
 
@@ -359,7 +487,9 @@ def train_chroma(rank, world_size, debug=False):
                 dataloader_config.batch_size
                 // training_config.cache_minibatch
                 // world_size
-            )
+            ),
+            desc=f"preparing latents, Rank {rank}",
+            position=rank,
         ):
             with torch.no_grad(), torch.autocast(
                 device_type="cuda", dtype=torch.bfloat16
@@ -444,7 +574,11 @@ def train_chroma(rank, world_size, debug=False):
 
         # aliasing
         mb = training_config.train_minibatch
-        for tmb_i in tqdm(range(dataloader_config.batch_size // mb // world_size)):
+        for tmb_i in tqdm(
+            range(dataloader_config.batch_size // mb // world_size),
+            desc=f"minibatch training, Rank {rank}",
+            position=rank,
+        ):
             # do this inside for loops!
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 pred = model(
@@ -466,9 +600,7 @@ def train_chroma(rank, world_size, debug=False):
         # and only offload non trainable params
         offload_param_count = 0
         for name, param in model.named_parameters():
-            if not any(
-                keyword in name for keyword in trained_layer_keywords
-            ):
+            if not any(keyword in name for keyword in trained_layer_keywords):
                 if offload_param_count < training_config.offload_param_count:
                     offload_param_count += param.numel()
                     param.data = param.data.to("cpu")
@@ -487,11 +619,58 @@ def train_chroma(rank, world_size, debug=False):
         optimizer_state_to(optimizer, "cpu")
         torch.cuda.empty_cache()
 
-        if (counter+1) % training_config.save_every == 0 and rank==0:
-            save_part(model, trained_layer_keywords, counter, training_config.save_folder)
+        if (counter + 1) % training_config.save_every == 0 and rank == 0:
+            save_part(
+                model, trained_layer_keywords, counter, training_config.save_folder
+            )
         if not debug:
             dist.barrier()
-        
+
+        if (counter + 1) % inference_config.inference_every == 0:
+
+            images_tensor = inference_wrapper(
+                model=model,
+                ae=ae,
+                t5_tokenizer=t5_tokenizer,
+                t5=t5,
+                seed=training_config.master_seed + rank,
+                steps=inference_config.steps,
+                guidance=inference_config.guidance,
+                cfg=inference_config.cfg,
+                prompts=inference_config.prompts,
+                rank=rank,
+                first_n_steps_wo_cfg=inference_config.first_n_steps_wo_cfg,
+                image_dim=inference_config.image_dim,
+                t5_max_length=inference_config.t5_max_length,
+            )
+            # gather from all gpus
+            if not debug:
+                gather_list = (
+                    [torch.empty_like(images_tensor) for _ in range(world_size)]
+                    if rank == 0
+                    else None
+                )
+                dist.gather(images_tensor, gather_list=gather_list, dst=0)
+            if rank == 0:
+                # Concatenate gathered tensors
+                if not debug:
+                    gathered_images = torch.cat(
+                        gather_list, dim=0
+                    )  # (total_images, C, H, W)
+                else:
+                    gathered_images = images_tensor
+                # Create a grid
+                grid = make_grid(
+                    gathered_images, nrow=8, normalize=True
+                )  # Adjust nrow as needed
+
+                # Save the grid
+                file_path = os.path.join(
+                    inference_config.inference_folder, f"{counter}.png"
+                )
+                save_image(grid, file_path)
+                print(f"Image grid saved to {file_path}")
+
         # flush
         acc_latents = []
         acc_embeddings = []
