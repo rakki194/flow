@@ -1,6 +1,9 @@
 import sys
 import os
-from dataclasses import dataclass
+import json
+from datetime import datetime
+from dataclasses import dataclass, asdict
+from typing import Optional
 
 from tqdm import tqdm
 from safetensors.torch import safe_open, save_file
@@ -18,6 +21,7 @@ from torchastic import Compass, StochasticAccumulator
 import random
 
 from transformers import T5Tokenizer
+import wandb
 
 from src.dataloaders.dataloader import TextImageDataset
 from src.models.chroma.model import Chroma, chroma_params
@@ -50,6 +54,9 @@ class TrainingConfig:
     trained_double_blocks: int
     save_every: int
     save_folder: str
+    wandb_project: Optional[str] = None
+    wandb_run: Optional[str] = None
+    wandb_entity: Optional[str] = None
 
 
 @dataclass
@@ -225,6 +232,17 @@ def cast_linear(module, dtype):
             cast_linear(child, dtype)
 
 
+def save_config_to_json(filepath: str, **configs):
+    json_data = {key: asdict(value) for key, value in configs.items()}
+    with open(filepath, "w") as json_file:
+        json.dump(json_data, json_file, indent=4)
+
+
+def load_config_from_json(filepath: str):
+    with open(filepath, "r") as json_file:
+        return json.load(json_file)
+
+
 def inference_wrapper(
     model,
     ae,
@@ -323,57 +341,85 @@ def train_chroma(rank, world_size, debug=False):
         setup_distributed(rank, world_size)
 
     ### ALL CONFIG IS HERE! ###
-    model_config = ModelConfig(
-        chroma_path="models/flux/FLUX.1-schnell/chroma-8.9b.safetensors",
-        vae_path="models/flux/ae.safetensors",
-        t5_path="models/flux/text_encoder_2",
-        t5_config_path="models/flux/text_encoder_2/config.json",
-        t5_tokenizer_path="models/flux/tokenizer_2",
-        t5_to_8bit=True,
-    )
+    # model_config = ModelConfig(
+    #     chroma_path="models/flux/FLUX.1-schnell/chroma-8.9b.safetensors",
+    #     vae_path="models/flux/ae.safetensors",
+    #     t5_path="models/flux/text_encoder_2",
+    #     t5_config_path="models/flux/text_encoder_2/config.json",
+    #     t5_tokenizer_path="models/flux/tokenizer_2",
+    #     t5_to_8bit=True,
+    # )
 
-    # default for debugging
-    training_config = TrainingConfig(
-        master_seed=0,
-        cache_minibatch=2,
-        train_minibatch=1,
-        offload_param_count=5000000000,
-        trained_single_blocks=4,
-        trained_double_blocks=4,
-        weight_decay=0.0001,
-        lr=1e-5,
-        warmup_steps=1,
-        change_layer_every=3,
-        save_every=6,
-        save_folder="testing",
-    )
+    # # default for debugging
+    # training_config = TrainingConfig(
+    #     master_seed=0,
+    #     cache_minibatch=2,
+    #     train_minibatch=1,
+    #     offload_param_count=5000000000,
+    #     trained_single_blocks=4,
+    #     trained_double_blocks=4,
+    #     weight_decay=0.0001,
+    #     lr=1e-5,
+    #     warmup_steps=1,
+    #     change_layer_every=3,
+    #     save_every=6,
+    #     save_folder="testing",
+    #     wandb_project="optimal transport",
+    #     wandb_run="chroma",
+    #     wandb_entity=None,
+    # )
 
-    dataloader_config = DataloaderConfig(
-        batch_size=8,
-        jsonl_metadata_path="test_raw_data.jsonl",
-        image_folder_path="furry_50k_4o/images",
-        base_resolution=[256],
-        tag_based=True,
-        tag_drop_percentage=0.2,
-        uncond_percentage=0.1,
-        resolution_step=64,
-        num_workers=2,
-        prefetch_factor=2,
-    )
+    # dataloader_config = DataloaderConfig(
+    #     batch_size=8,
+    #     jsonl_metadata_path="test_raw_data.jsonl",
+    #     image_folder_path="furry_50k_4o/images",
+    #     base_resolution=[256],
+    #     tag_based=True,
+    #     tag_drop_percentage=0.2,
+    #     uncond_percentage=0.1,
+    #     resolution_step=64,
+    #     num_workers=2,
+    #     prefetch_factor=2,
+    # )
 
-    inference_config = InferenceConfig(
-        inference_every=2,
-        inference_folder="inference_folder",
-        steps=20,
-        guidance=3,
-        first_n_steps_wo_cfg=-1,
-        image_dim=(512, 512),
-        t5_max_length=512,
-        cfg=1,
-        prompts=[
-            "a cute cat sat on a mat while receiving a head pat from his owner called Matt",
-            # "baked potato, on the space floating orbiting around the earth",
-        ],
+    # inference_config = InferenceConfig(
+    #     inference_every=2,
+    #     inference_folder="inference_folder",
+    #     steps=20,
+    #     guidance=3,
+    #     first_n_steps_wo_cfg=-1,
+    #     image_dim=(512, 512),
+    #     t5_max_length=512,
+    #     cfg=1,
+    #     prompts=[
+    #         "a cute cat sat on a mat while receiving a head pat from his owner called Matt",
+    #         "baked potato, on the space floating orbiting around the earth",
+    #     ],
+    # )
+
+    config_data = load_config_from_json("training_config.json")
+
+    training_config = TrainingConfig(**config_data["training"])
+    inference_config = InferenceConfig(**config_data["inference"])
+    dataloader_config = DataloaderConfig(**config_data["dataloader"])
+    model_config = ModelConfig(**config_data["model"])
+
+    # wandb logging
+    if training_config.wandb_project is not None and rank == 0:
+        current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        wandb.init(
+            project=training_config.wandb_project,
+            name=f"{training_config.wandb_run}_{current_datetime}",
+            entity=training_config.wandb_entity,
+        )
+
+    # paste the training config for this run
+    save_config_to_json(
+        filepath=f"{training_config.save_folder}/training_config.json",
+        training=training_config,
+        inference=inference_config,
+        dataloader=dataloader_config,
+        model=model_config,
     )
 
     os.makedirs(inference_config.inference_folder, exist_ok=True)
@@ -608,11 +654,16 @@ def train_chroma(rank, world_size, debug=False):
                     guidance=static_guidance[tmb_i * mb : tmb_i * mb + mb],
                 )
                 # TODO: need to scale the loss with rank count and grad accum!
-                loss = F.mse_loss(
-                    pred,
-                    target[tmb_i * mb : tmb_i * mb + mb],
+                loss = (
+                    F.mse_loss(
+                        pred,
+                        target[tmb_i * mb : tmb_i * mb + mb],
+                    )
+                    / dataloader_config.batch_size
                 )
+
             loss.backward()
+        loss_log = loss.detach().clone() * dataloader_config.batch_size
 
         # offload some params to cpu just enough to make room for the caching process
         # and only offload non trainable params
@@ -634,6 +685,9 @@ def train_chroma(rank, world_size, debug=False):
         optimizer.step()
         optimizer.zero_grad()
 
+        if training_config.wandb_project is not None and rank == 0:
+            wandb.log({"loss": loss_log, "lr": training_config.lr})
+
         optimizer_state_to(optimizer, "cpu")
         torch.cuda.empty_cache()
 
@@ -645,55 +699,84 @@ def train_chroma(rank, world_size, debug=False):
             dist.barrier()
 
         if (counter + 1) % inference_config.inference_every == 0:
+            all_grids = []
 
-            images_tensor = inference_wrapper(
-                model=model,
-                ae=ae,
-                t5_tokenizer=t5_tokenizer,
-                t5=t5,
-                seed=training_config.master_seed + rank,
-                steps=inference_config.steps,
-                guidance=inference_config.guidance,
-                cfg=inference_config.cfg,
-                prompts=inference_config.prompts,
-                rank=rank,
-                first_n_steps_wo_cfg=inference_config.first_n_steps_wo_cfg,
-                image_dim=inference_config.image_dim,
-                t5_max_length=inference_config.t5_max_length,
-            )
-            # gather from all gpus
-            if not debug:
-                gather_list = (
-                    [torch.empty_like(images_tensor) for _ in range(world_size)]
-                    if rank == 0
-                    else None
+            preview_prompts = inference_config.prompts + caption[:1]
+
+            for prompt in preview_prompts:
+                images_tensor = inference_wrapper(
+                    model=model,
+                    ae=ae,
+                    t5_tokenizer=t5_tokenizer,
+                    t5=t5,
+                    seed=training_config.master_seed + rank,
+                    steps=inference_config.steps,
+                    guidance=inference_config.guidance,
+                    cfg=inference_config.cfg,
+                    prompts=[prompt],  # Pass single prompt as a list
+                    rank=rank,
+                    first_n_steps_wo_cfg=inference_config.first_n_steps_wo_cfg,
+                    image_dim=inference_config.image_dim,
+                    t5_max_length=inference_config.t5_max_length,
                 )
-                dist.gather(images_tensor, gather_list=gather_list, dst=0)
-            if rank == 0:
-                # Concatenate gathered tensors
-                if not debug:
-                    gathered_images = torch.cat(
-                        gather_list, dim=0
-                    )  # (total_images, C, H, W)
-                else:
-                    gathered_images = images_tensor
-                # Create a grid
-                grid = make_grid(
-                    gathered_images, nrow=8, normalize=True
-                )  # Adjust nrow as needed
 
-                # Save the grid
+                # gather from all gpus
+                if not debug:
+                    gather_list = (
+                        [torch.empty_like(images_tensor) for _ in range(world_size)]
+                        if rank == 0
+                        else None
+                    )
+                    dist.gather(images_tensor, gather_list=gather_list, dst=0)
+
+                if rank == 0:
+                    # Concatenate gathered tensors
+                    if not debug:
+                        gathered_images = torch.cat(
+                            gather_list, dim=0
+                        )  # (total_images, C, H, W)
+                    else:
+                        gathered_images = images_tensor
+
+                    # Create a grid for this prompt
+                    grid = make_grid(
+                        gathered_images, nrow=8, normalize=True
+                    )  # Adjust nrow as needed
+                    all_grids.append(grid)
+
+            if rank == 0:
+                # Combine all grids vertically
+                final_grid = torch.cat(
+                    all_grids, dim=1
+                )  # Concatenate along height dimension
+
+                # Save the combined grid
                 file_path = os.path.join(
                     inference_config.inference_folder, f"{counter}.png"
                 )
-                save_image(grid, file_path)
-                print(f"Image grid saved to {file_path}")
+                save_image(final_grid, file_path)
+                print(f"Combined image grid saved to {file_path}")
+
+                # upload preview to wandb
+                if training_config.wandb_project is not None:
+                    wandb.log(
+                        {
+                            "example_image": wandb.Image(
+                                file_path, caption="\n".join(preview_prompts)
+                            )
+                        }
+                    )
 
         # flush
         acc_latents = []
         acc_embeddings = []
 
-    print()
+    # save final model
+    if rank == 0:
+        torch.save(
+            model.state_dict(),
+            f"{training_config.save_folder}/{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}.pth",
+        )
 
     if not debug:
         dist.destroy_process_group()
