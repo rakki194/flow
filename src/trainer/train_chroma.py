@@ -6,6 +6,7 @@ from tqdm import tqdm
 from safetensors.torch import safe_open, save_file
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -87,6 +88,7 @@ class ModelConfig:
     t5_path: str
     t5_config_path: str
     t5_tokenizer_path: str
+    t5_to_8bit: bool
 
 
 def setup_distributed(rank, world_size):
@@ -210,6 +212,19 @@ def save_part(model, trained_layer_keywords, counter, save_folder):
     )
 
 
+def cast_linear(module, dtype):
+    """
+    Recursively cast all nn.Linear layers in the model to bfloat16.
+    """
+    for name, child in module.named_children():
+        # If the child module is nn.Linear, cast it to bf16
+        if isinstance(child, nn.Linear):
+            child.to(dtype)
+        else:
+            # Recursively apply to child modules
+            cast_linear(child, dtype)
+
+
 def inference_wrapper(
     model,
     ae,
@@ -314,6 +329,7 @@ def train_chroma(rank, world_size, debug=False):
         t5_path="models/flux/text_encoder_2",
         t5_config_path="models/flux/text_encoder_2/config.json",
         t5_tokenizer_path="models/flux/tokenizer_2",
+        t5_to_8bit=True,
     )
 
     # default for debugging
@@ -397,6 +413,8 @@ def train_chroma(rank, world_size, debug=False):
         )
         t5.eval()
         t5.to(torch.bfloat16)
+        if model_config.t5_to_8bit:
+            cast_linear(t5, torch.float8_e4m3fn)
 
     dataset = TextImageDataset(
         batch_size=dataloader_config.batch_size,
