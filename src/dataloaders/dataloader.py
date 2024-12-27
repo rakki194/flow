@@ -15,6 +15,7 @@ from .utils import read_jsonl
 from .tag_preprocess_utils import create_tree, prune
 from . import color_profile_handling
 from .bucketing_logic import create_bucket_jsonl
+import psutil
 
 log = logging.getLogger(__name__)
 
@@ -80,6 +81,7 @@ class TextImageDataset(Dataset):
             height_key_name="height",
             width_key_name="width",
             step=self.resolution_step,
+            num_processes=psutil.cpu_count(logical=False) // self.num_gpus - 1,
         )
 
         if self.tag_implication_path is not None:
