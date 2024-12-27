@@ -7,6 +7,12 @@ import logging
 from tqdm import tqdm
 import pandas as pd
 
+import multiprocessing as mp
+from functools import partial
+from itertools import islice
+from tqdm import tqdm
+import psutil
+
 from .utils import read_jsonl
 
 csv.field_size_limit(sys.maxsize)
@@ -282,5 +288,109 @@ def create_bucket_jsonl(
         else:
             log.info("deleted", item["filename"], "zero px metadata")
             pass
+
+    return processed_jsonl
+
+
+def chunk_list(lst, n):
+    """Split list into n chunks of approximately equal size"""
+    k, m = divmod(len(lst), n)
+    return [lst[i * k + min(i, m) : (i + 1) * k + min(i + 1, m)] for i in range(n)]
+
+
+def process_chunk(
+    chunk, standardized_buckets, ratio_cutoff, width_key_name, height_key_name
+):
+    """Process a chunk of JSONL data"""
+    processed_chunk = []
+
+    for item in chunk:
+        # grab image width and height
+        image_width = int(item[width_key_name])
+        image_height = int(item[height_key_name])
+
+        # compute the closest bucket while also removing extreme aspect ratio
+        if image_width > 0 and image_height > 0:  # guard check
+            aspect_ratio = image_width / image_height
+            if (
+                ratio_cutoff > aspect_ratio > 1.0 / ratio_cutoff
+            ):  # remove extreme aspect ratio
+                w, h = _normalize_width_height(image_width, image_height)
+
+                # enumerate all possible bucket
+                item["buckets"] = []
+                for res, buckets in standardized_buckets.items():
+                    closest_bucket = _closest_bucket(w, h, buckets)
+                    item["buckets"].append(closest_bucket)
+
+                processed_chunk.append(item)
+            else:
+                log.info("deleted", item["filename"], f"bad aspect ratio", aspect_ratio)
+        else:
+            log.info("deleted", item["filename"], "zero px metadata")
+
+    return processed_chunk
+
+
+def create_bucket_jsonl(
+    jsonl_path,
+    base_resolution,  # Need to be an array like this: `[384, 512, 640, 768, 896, 1024]`
+    step=8,
+    ratio_cutoff=2,
+    height_key_name="height",
+    width_key_name="width",
+    num_processes=None,
+):
+    """Create bucket JSONL with multiprocessing support"""
+    if num_processes is None:
+        num_processes = psutil.cpu_count(logical=False) - 1
+
+    jsonl = read_jsonl(jsonl_path)
+
+    # create a list of resolution bucket given base resolution
+    multires_buckets = {}
+    for res in base_resolution:
+        buckets = _bucket_generator(res, ratio_cutoff, step)
+        multires_buckets[res] = buckets
+
+    # create scaled version for easy distance calculation
+    standardized_buckets = {}
+    for res, buckets in tqdm(
+        multires_buckets.items(),
+        total=len(multires_buckets),
+        desc="creating multi-res buckets",
+    ):
+        this_standardized_bucket = {}
+        for bucket in buckets:
+            b_st = _normalize_width_height(*bucket)  # (w, h)
+            this_standardized_bucket[b_st] = bucket
+        standardized_buckets[res] = this_standardized_bucket
+
+    # Split the data into chunks
+    chunks = chunk_list(jsonl, num_processes)
+
+    # Create a partial function with the fixed arguments
+    process_func = partial(
+        process_chunk,
+        standardized_buckets=standardized_buckets,
+        ratio_cutoff=ratio_cutoff,
+        width_key_name=width_key_name,
+        height_key_name=height_key_name,
+    )
+
+    # Process chunks in parallel
+    with mp.Pool(processes=num_processes) as pool:
+        results = list(
+            tqdm(
+                pool.imap(process_func, chunks),
+                total=len(chunks),
+                desc="generating buckets (parallel)",
+            )
+        )
+
+    # Combine results from all processes
+    processed_jsonl = []
+    for chunk_result in results:
+        processed_jsonl.extend(chunk_result)
 
     return processed_jsonl
