@@ -19,8 +19,28 @@ jsonl_out = prepare_jsonl(
     width_col="image_width",
     height_col="image_height",
     ext_col="file_ext",
+    is_tag_based=True,
+    is_url_based=False,
+    is_underscore_based_tags=True
 )
 
-save_as_jsonl(jsonl_out, "test_raw_data.jsonl")
+save_as_jsonl(jsonl_out, "test_training_data.jsonl")
+
+OUTPUT_JSONL = "0.jsonl"
+
+
+jsonl_out = prepare_jsonl(
+    OUTPUT_JSONL,
+    filename_col="url",
+    caption_or_tags_col="regular_summary",
+    width_col="image_width",
+    height_col="image_height",
+    ext_col=None,
+    is_tag_based=False,
+    is_url_based=True,
+    is_underscore_based_tags=False
+)
+
+save_as_jsonl(jsonl_out, "test_training_data_mj.jsonl")
 
 print()

@@ -78,6 +78,9 @@ def prepare_jsonl(
     ext_col=None,
     ext="",
     chunksize=1000,
+    is_tag_based=False,
+    is_url_based=False,
+    is_underscore_based_tags=False,
 ):
     """
     Reads a JSONL file in chunks, processes each line, and creates a list of metadata dictionaries.
@@ -102,12 +105,21 @@ def prepare_jsonl(
         for line in f:
             data = json.loads(line)
             if ext_col:
-                ext = data[ext_col]
+                ext = "." + data[ext_col]
+
+            if is_underscore_based_tags:
+                captions = (
+                    data[caption_or_tags_col].replace(" ", ", ").replace("_", " ")
+                )
+            else:
+                captions = data[caption_or_tags_col]
             metadata = {
-                "filename": data[filename_col] + "." + ext,
-                "caption_or_tags": data[caption_or_tags_col],
+                "filename": data[filename_col] + ext,
+                "caption_or_tags": captions,
                 "width": data[width_col],
                 "height": data[height_col],
+                "is_tag_based": is_tag_based,
+                "is_url_based": is_url_based,
             }
             chunk.append(metadata)
 

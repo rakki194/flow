@@ -11,6 +11,11 @@ import torch
 from torch.utils.data import Dataset
 import torchvision.transforms.v2 as v2
 
+from io import BytesIO
+import concurrent.futures
+import requests
+from requests.exceptions import RequestException, Timeout
+
 from .utils import read_jsonl
 from .tag_preprocess_utils import create_tree, prune
 from . import color_profile_handling
@@ -27,17 +32,18 @@ class TextImageDataset(Dataset):
         jsonl_path,
         image_folder_path,
         tag_implication_path=None,
-        ratio_cutoff=2,
+        ratio_cutoff=2.0,
         resolution_step=8,
         base_res=[
             1024
         ],  # resolution computation should be in here instead of in csv prep!
-        tag_based=True,
+        shuffle_tags=True,
         tag_drop_percentage=0.8,
         uncond_percentage=0.01,
         seed=0,
         rank=0,
         num_gpus=1,
+        timeout=10,
     ):
         # coarsened dataset, the batch is handled by the dataset and not the dataloader,
         # increase dataloader prefetch so this thing  run optimally!
@@ -49,12 +55,13 @@ class TextImageDataset(Dataset):
         self.ratio_cutoff = ratio_cutoff
         self.resolution_step = resolution_step
         self.image_folder_path = image_folder_path
-        self.tag_drop_percentage = tag_drop_percentage
-        self.tag_based = tag_based
+        self.tag_drop_percentage = tag_drop_percentage  # only  applicable to tags
+        self.shuffle_tags = shuffle_tags  # replace this with "shuffle_tags" because we're going to put the metadata in the jsonl if it's a tag or caption based
         self.uncond_percentage = uncond_percentage
         self.num_gpus = num_gpus
         self.rank = rank
         self.rank_batch_size = batch_size // num_gpus
+        self.timeout = timeout
         assert (
             batch_size % num_gpus
         ) == 0, "batch size is not divisible by the number of GPUs!"
@@ -70,6 +77,7 @@ class TextImageDataset(Dataset):
 
         # slice batches using round robbin
         self._round_robin()
+        self.session = requests.Session()
 
     def _load_batches(self):
         batch_size = self.batch_size
@@ -102,6 +110,8 @@ class TextImageDataset(Dataset):
                 "filename": jsonl[i]["filename"],
                 "caption_or_tags": caption_or_tags,
                 "bucket": res_bucket,
+                "is_tag_based": jsonl[i]["is_tag_based"],
+                "is_url_based": jsonl[i]["is_url_based"],
             }
 
             if res_bucket in buckets:
@@ -211,80 +221,97 @@ class TextImageDataset(Dataset):
 
     # </some utility method here>
 
-    def __len__(self):
-        return len(self.batches)
-
-    def __getitem__(self, index):
-        batch = self.batches[index]  # the batches is already batched and it's a list
-        images = []
-        training_prompts = []
-
-        for i, sample in enumerate(batch):
-            try:
-                # just for testing echoing
-                # if i > 2:
-                #     raise Exception("test incomplete batch!")
-
-                standard_width, standard_height = sample["bucket"]
-                image_path = os.path.join(self.image_folder_path, sample["filename"])
+    def _load_image(self, sample, session, image_folder_path, timeout):
+        try:
+            if sample["is_url_based"]:
+                response = session.get(sample["filename"], timeout=timeout)
+                response.raise_for_status()  # Raises an HTTPError if the status code is 4xx/5xx
+                return Image.open(BytesIO(response.content)).convert("RGB")
+            else:
+                image_path = os.path.join(image_folder_path, sample["filename"])
 
                 # Check if a JXL version of the file exists and prioritize it
                 jxl_image_path = os.path.splitext(image_path)[0] + ".jxl"
                 if os.path.exists(jxl_image_path):
                     # Custom handling for JXL format
-                    image = color_profile_handling.open_srgb(jxl_image_path).convert(
+                    return color_profile_handling.open_srgb(jxl_image_path).convert(
                         "RGB"
                     )
                 elif os.path.exists(image_path):
                     # Standard handling if the specified file exists
-                    image = Image.open(image_path).convert("RGB")
+                    return Image.open(image_path).convert("RGB")
                 else:
                     # Try alternative extensions if the main file doesn't exist
                     filename, _ = os.path.splitext(sample["filename"])
                     extensions = ["png", "jpg", "jpeg", "webp"]
                     for ext in extensions:
                         alt_image_path = os.path.join(
-                            self.image_folder_path, f"{filename}.{ext}"
+                            image_folder_path, f"{filename}.{ext}"
                         )
                         if os.path.exists(alt_image_path):
-                            image = Image.open(alt_image_path).convert("RGB")
-                            break
+                            return Image.open(alt_image_path).convert("RGB")
+            return None
+        except Exception as e:
+            log.error(f"An error occurred: {e} for {sample['filename']}")
+            return None
+
+    def __len__(self):
+        return len(self.batches)
+
+    def __getitem__(self, index):
+        batch = self.batches[index]  # the batches is already batched and it's a list
+
+        # Use threading for concurrent image loading
+        raw_images = []
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = [
+                executor.submit(
+                    self._load_image,
+                    sample,
+                    self.session,
+                    self.image_folder_path,
+                    self.timeout,
+                )
+                for sample in batch
+            ]
+            raw_images = [future.result() for future in futures]
+
+        images = []
+        training_prompts = []
+
+        for i, sample in enumerate(batch):
+            try:
+
+                standard_width, standard_height = sample["bucket"]
 
                 image = self.scale_and_crop_long_axis(
-                    image, standard_height, standard_width
+                    raw_images[i], standard_height, standard_width
                 )
                 image = self.image_transforms(image)
                 images.append(image)
 
-                # print()
+                # unconditional drop out
+                tmp = random.random()
+                if tmp >= 1 - self.uncond_percentage:
+                    sample["caption_or_tags"] = ""
+
+                # tags processing
+                if self.shuffle_tags and sample["is_tag_based"]:
+
+                    tags = sample["caption_or_tags"].split(",")
+                    random.shuffle(tags)
+
+                    tags = self._sample_elements_by_percentage(
+                        tags, random.uniform(1 - self.tag_drop_percentage, 1)
+                    )
+                    tags = ",".join(tags).lstrip()
+                    training_prompts.append(tags)
+                else:
+                    training_prompts.append(sample["caption_or_tags"])
 
             except Exception as e:
                 log.error(f"An error occurred: {e} for {sample['filename']}")
                 continue
-
-            # unconditional drop out
-            tmp = random.random()
-            if tmp >= 1 - self.uncond_percentage:
-                sample["caption_or_tags"] = ""
-
-            # tags processing
-            if self.tag_based:
-                if type(sample["caption_or_tags"]) != list:
-                    tags = sample["caption_or_tags"].split(
-                        " "
-                    )  # TODO: filter this to only use species tags and position
-                else:
-                    tags = sample["caption_or_tags"]
-                random.shuffle(tags)
-                tags = self._sample_elements_by_percentage(
-                    tags, random.uniform(1 - self.tag_drop_percentage, 1)
-                )
-                # coma separated
-                tags = [s.replace("_", " ") for s in tags]
-                tags = ", ".join(tags)
-                training_prompts.append(tags)
-            else:
-                training_prompts.append(sample["caption_or_tags"])
 
         # echo short batch
         if self.rank_batch_size > 1:
