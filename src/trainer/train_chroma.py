@@ -78,12 +78,13 @@ class DataloaderConfig:
     jsonl_metadata_path: str
     image_folder_path: str
     base_resolution: list[int]
-    tag_based: bool
+    shuffle_tags: bool
     tag_drop_percentage: float
     uncond_percentage: float
     resolution_step: int
     num_workers: int
     prefetch_factor: int
+    ratio_cutoff: float
 
 
 @dataclass
@@ -238,6 +239,11 @@ def save_config_to_json(filepath: str, **configs):
         json.dump(json_data, json_file, indent=4)
 
 
+def dump_dict_to_json(data, file_path):
+    with open(file_path, "w") as json_file:
+        json.dump(data, json_file, indent=4)
+
+
 def load_config_from_json(filepath: str):
     with open(filepath, "r") as json_file:
         return json.load(json_file)
@@ -330,8 +336,6 @@ def inference_wrapper(
             t5.to("cpu")
             ae.to("cpu")
 
-    # grid = make_grid(output_image, nrow=2, padding=2, normalize=True)
-
     return output_image
 
 
@@ -340,69 +344,15 @@ def train_chroma(rank, world_size, debug=False):
     if not debug:
         setup_distributed(rank, world_size)
 
-    ### ALL CONFIG IS HERE! ###
-    # model_config = ModelConfig(
-    #     chroma_path="models/flux/FLUX.1-schnell/chroma-8.9b.safetensors",
-    #     vae_path="models/flux/ae.safetensors",
-    #     t5_path="models/flux/text_encoder_2",
-    #     t5_config_path="models/flux/text_encoder_2/config.json",
-    #     t5_tokenizer_path="models/flux/tokenizer_2",
-    #     t5_to_8bit=True,
-    # )
-
-    # # default for debugging
-    # training_config = TrainingConfig(
-    #     master_seed=0,
-    #     cache_minibatch=2,
-    #     train_minibatch=1,
-    #     offload_param_count=5000000000,
-    #     trained_single_blocks=4,
-    #     trained_double_blocks=4,
-    #     weight_decay=0.0001,
-    #     lr=1e-5,
-    #     warmup_steps=1,
-    #     change_layer_every=3,
-    #     save_every=6,
-    #     save_folder="testing",
-    #     wandb_project="optimal transport",
-    #     wandb_run="chroma",
-    #     wandb_entity=None,
-    # )
-
-    # dataloader_config = DataloaderConfig(
-    #     batch_size=8,
-    #     jsonl_metadata_path="test_raw_data.jsonl",
-    #     image_folder_path="furry_50k_4o/images",
-    #     base_resolution=[256],
-    #     tag_based=True,
-    #     tag_drop_percentage=0.2,
-    #     uncond_percentage=0.1,
-    #     resolution_step=64,
-    #     num_workers=2,
-    #     prefetch_factor=2,
-    # )
-
-    # inference_config = InferenceConfig(
-    #     inference_every=2,
-    #     inference_folder="inference_folder",
-    #     steps=20,
-    #     guidance=3,
-    #     first_n_steps_wo_cfg=-1,
-    #     image_dim=(512, 512),
-    #     t5_max_length=512,
-    #     cfg=1,
-    #     prompts=[
-    #         "a cute cat sat on a mat while receiving a head pat from his owner called Matt",
-    #         "baked potato, on the space floating orbiting around the earth",
-    #     ],
-    # )
-
     config_data = load_config_from_json("training_config.json")
 
     training_config = TrainingConfig(**config_data["training"])
     inference_config = InferenceConfig(**config_data["inference"])
     dataloader_config = DataloaderConfig(**config_data["dataloader"])
     model_config = ModelConfig(**config_data["model"])
+    extra_inference_config = [
+        InferenceConfig(**conf) for conf in config_data["extra_inference_config"]
+    ]
 
     # wandb logging
     if training_config.wandb_project is not None and rank == 0:
@@ -413,13 +363,10 @@ def train_chroma(rank, world_size, debug=False):
             entity=training_config.wandb_entity,
         )
 
+    os.makedirs(training_config.save_folder, exist_ok=True)
     # paste the training config for this run
-    save_config_to_json(
-        filepath=f"{training_config.save_folder}/training_config.json",
-        training=training_config,
-        inference=inference_config,
-        dataloader=dataloader_config,
-        model=model_config,
+    dump_dict_to_json(
+        config_data, f"{training_config.save_folder}/training_config.json"
     )
 
     os.makedirs(inference_config.inference_folder, exist_ok=True)
@@ -470,14 +417,26 @@ def train_chroma(rank, world_size, debug=False):
         # preprocess the jsonl tags before training!
         # tag_implication_path="tag_implications.csv",
         base_res=dataloader_config.base_resolution,
-        tag_based=dataloader_config.tag_based,
+        shuffle_tags=dataloader_config.shuffle_tags,
         tag_drop_percentage=dataloader_config.tag_drop_percentage,
         uncond_percentage=dataloader_config.uncond_percentage,
         resolution_step=dataloader_config.resolution_step,
         seed=training_config.master_seed,
         rank=rank,
         num_gpus=world_size,
+        ratio_cutoff=dataloader_config.ratio_cutoff,
     )
+
+    # debug dataloader
+    # os.makedirs(f"preview_{rank}", exist_ok=True)
+
+    # for i in tqdm(range(10)):
+    #     images, caption, index = dataset[i]
+    #     with open(f"preview_{rank}/{i}.jsonl", 'w') as f:
+    #         for item in caption:
+    #             json.dump(item, f)  # Dump the item as a JSON object
+    #             f.write('\n')  # Write a newline after each JSON object
+    #     save_image(make_grid(images.clip(-1, 1)), f"preview_{rank}/{i}.jpg", normalize=True)
 
     dataloader = DataLoader(
         dataset,
@@ -501,6 +460,9 @@ def train_chroma(rank, world_size, debug=False):
         desc=f"training, Rank {rank}",
         position=rank,
     ):
+        images, caption, index = data[0]
+        # just in case the dataloader is failing
+        caption = [x if x is not None else "" for x in caption]
         if counter % training_config.change_layer_every == 0:
             # periodically remove the optimizer and swap it with new one
 
@@ -533,10 +495,6 @@ def train_chroma(rank, world_size, debug=False):
             )
 
             optimizer_counter += 1
-
-        images, caption, index = data[0]
-
-        print(images.shape)
 
         # we load and unload vae and t5 here to reduce vram usage
         # think of this as caching on the fly
@@ -661,7 +619,7 @@ def train_chroma(rank, world_size, debug=False):
                     )
                     / dataloader_config.batch_size
                 )
-
+            torch.cuda.empty_cache()
             loss.backward()
         loss_log = loss.detach().clone() * dataloader_config.batch_size
 
@@ -673,8 +631,9 @@ def train_chroma(rank, world_size, debug=False):
                 if offload_param_count < training_config.offload_param_count:
                     offload_param_count += param.numel()
                     param.data = param.data.to("cpu")
-        torch.cuda.empty_cache()
 
+        del acc_embeddings, noisy_latents, acc_latents
+        torch.cuda.empty_cache()
         StochasticAccumulator.reassign_grad_buffer(model)
 
         if not debug:
@@ -692,8 +651,9 @@ def train_chroma(rank, world_size, debug=False):
         torch.cuda.empty_cache()
 
         if (counter + 1) % training_config.save_every == 0 and rank == 0:
-            save_part(
-                model, trained_layer_keywords, counter, training_config.save_folder
+            torch.save(
+                model.state_dict(),
+                f"{training_config.save_folder}/{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}.pth",
             )
         if not debug:
             dist.barrier()
@@ -743,6 +703,48 @@ def train_chroma(rank, world_size, debug=False):
                         gathered_images, nrow=8, normalize=True
                     )  # Adjust nrow as needed
                     all_grids.append(grid)
+
+            for extra_inference in extra_inference_config:
+                for prompt in preview_prompts:
+                    images_tensor = inference_wrapper(
+                        model=model,
+                        ae=ae,
+                        t5_tokenizer=t5_tokenizer,
+                        t5=t5,
+                        seed=training_config.master_seed + rank,
+                        steps=extra_inference.steps,
+                        guidance=extra_inference.guidance,
+                        cfg=extra_inference.cfg,
+                        prompts=[prompt],  # Pass single prompt as a list
+                        rank=rank,
+                        first_n_steps_wo_cfg=extra_inference.first_n_steps_wo_cfg,
+                        image_dim=extra_inference.image_dim,
+                        t5_max_length=extra_inference.t5_max_length,
+                    )
+
+                    # gather from all gpus
+                    if not debug:
+                        gather_list = (
+                            [torch.empty_like(images_tensor) for _ in range(world_size)]
+                            if rank == 0
+                            else None
+                        )
+                        dist.gather(images_tensor, gather_list=gather_list, dst=0)
+
+                    if rank == 0:
+                        # Concatenate gathered tensors
+                        if not debug:
+                            gathered_images = torch.cat(
+                                gather_list, dim=0
+                            )  # (total_images, C, H, W)
+                        else:
+                            gathered_images = images_tensor
+
+                        # Create a grid for this prompt
+                        grid = make_grid(
+                            gathered_images, nrow=8, normalize=True
+                        )  # Adjust nrow as needed
+                        all_grids.append(grid)
 
             if rank == 0:
                 # Combine all grids vertically
