@@ -104,24 +104,25 @@ def prepare_jsonl(
 
         for line in f:
             data = json.loads(line)
-            if ext_col:
-                ext = "." + data[ext_col]
+            if not data["is_truncated"]:
+                if ext_col:
+                    ext = "." + data[ext_col]
 
-            if is_underscore_based_tags:
-                captions = (
-                    data[caption_or_tags_col].replace(" ", ", ").replace("_", " ")
-                )
-            else:
-                captions = data[caption_or_tags_col]
-            metadata = {
-                "filename": data[filename_col] + ext,
-                "caption_or_tags": captions,
-                "width": data[width_col],
-                "height": data[height_col],
-                "is_tag_based": is_tag_based,
-                "is_url_based": is_url_based,
-            }
-            chunk.append(metadata)
+                if is_underscore_based_tags:
+                    captions = (
+                        data[caption_or_tags_col].replace(" ", ", ").replace("_", " ")
+                    )
+                else:
+                    captions = data[caption_or_tags_col]
+                metadata = {
+                    "filename": data[filename_col] + ext,
+                    "caption_or_tags": captions,
+                    "width": data[width_col],
+                    "height": data[height_col],
+                    "is_tag_based": is_tag_based,
+                    "is_url_based": is_url_based,
+                }
+                chunk.append(metadata)
 
             if len(chunk) >= chunksize:
                 jsonl.extend(chunk)
