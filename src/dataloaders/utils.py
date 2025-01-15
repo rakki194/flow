@@ -81,6 +81,7 @@ def prepare_jsonl(
     is_tag_based=False,
     is_url_based=False,
     is_underscore_based_tags=False,
+    uncond=False
 ):
     """
     Reads a JSONL file in chunks, processes each line, and creates a list of metadata dictionaries.
@@ -116,7 +117,7 @@ def prepare_jsonl(
                     captions = data[caption_or_tags_col]
                 metadata = {
                     "filename": data[filename_col] + ext,
-                    "caption_or_tags": captions,
+                    "caption_or_tags": captions if not uncond else "",
                     "width": data[width_col],
                     "height": data[height_col],
                     "is_tag_based": is_tag_based,
