@@ -98,6 +98,7 @@ class ModelConfig:
     t5_config_path: str
     t5_tokenizer_path: str
     t5_to_8bit: bool
+    t5_max_length: int
 
 
 def setup_distributed(rank, world_size):
@@ -526,7 +527,7 @@ def train_chroma(rank, world_size, debug=False):
                         + training_config.cache_minibatch
                     ],
                     padding="max_length",
-                    max_length=512,
+                    max_length=training_config.t5_max_length,
                     truncation=True,
                     return_length=False,
                     return_overflowing_tokens=False,
