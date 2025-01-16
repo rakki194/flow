@@ -85,6 +85,7 @@ class DataloaderConfig:
     num_workers: int
     prefetch_factor: int
     ratio_cutoff: float
+    thread_per_worker: int
 
 
 @dataclass
@@ -596,6 +597,7 @@ def train_chroma(rank, world_size, debug=False):
 
         # aliasing
         mb = training_config.train_minibatch
+        loss_log = []
         for tmb_i in tqdm(
             range(dataloader_config.batch_size // mb // world_size),
             desc=f"minibatch training, Rank {rank}",
@@ -621,8 +623,8 @@ def train_chroma(rank, world_size, debug=False):
                 )
             torch.cuda.empty_cache()
             loss.backward()
-        loss_log = loss.detach().clone() * dataloader_config.batch_size
-
+            loss_log.append(loss.detach().clone() * dataloader_config.batch_size)
+        loss_log = sum(loss_log) / len(loss_log)
         # offload some params to cpu just enough to make room for the caching process
         # and only offload non trainable params
         offload_param_count = 0

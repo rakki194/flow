@@ -82,7 +82,7 @@ def prepare_jsonl(
     is_tag_based=False,
     is_url_based=False,
     is_underscore_based_tags=False,
-    uncond=False
+    uncond=False,
 ):
     """
     Reads a JSONL file in chunks, processes each line, and creates a list of metadata dictionaries.
@@ -156,7 +156,7 @@ def sample_jsonl(input_file, output_file, sample_size, seed=None):
     total_lines = 0
 
     # Reservoir sampling to select random lines
-    with open(input_file, 'r', encoding='utf-8') as infile:
+    with open(input_file, "r", encoding="utf-8") as infile:
         for line in infile:
             total_lines += 1
             if len(reservoir) < sample_size:
@@ -168,7 +168,35 @@ def sample_jsonl(input_file, output_file, sample_size, seed=None):
                     reservoir[replace_idx] = line
 
     # Write the sampled lines to the output file
-    with open(output_file, 'w', encoding='utf-8') as outfile:
+    with open(output_file, "w", encoding="utf-8") as outfile:
         outfile.writelines(reservoir)
-    
+
     print(f"Sample of {sample_size} lines written to {output_file}")
+
+
+def create_random_sample(input_file, sample_size):
+    """
+    Create a random sample of lines from a JSONL file.
+
+    Parameters:
+        input_file (str): Path to the input JSONL file.
+        sample_size (int): Number of lines to sample.
+
+    Returns:
+        dict: A dictionary with sampled lines, where keys are line indices and values are the JSON objects.
+    """
+    # Read all lines from the input file
+    with open(input_file, "r", encoding="utf-8") as infile:
+        lines = infile.readlines()
+
+    # Check if the sample size is greater than the available lines
+    if sample_size > len(lines):
+        raise ValueError("Sample size is larger than the number of lines in the file.")
+
+    # Randomly sample line indices
+    sampled_indices = random.sample(range(len(lines)), sample_size)
+
+    # Parse the sampled lines into JSON objects and store them in a dictionary
+    sampled_dict = [json.loads(lines[index]) for index in sampled_indices]
+
+    return sampled_dict

@@ -44,6 +44,7 @@ class TextImageDataset(Dataset):
         rank=0,
         num_gpus=1,
         timeout=10,
+        thread_per_worker=100,
     ):
         # coarsened dataset, the batch is handled by the dataset and not the dataloader,
         # increase dataloader prefetch so this thing  run optimally!
@@ -78,6 +79,7 @@ class TextImageDataset(Dataset):
         # slice batches using round robbin
         self._round_robin()
         self.session = requests.Session()
+        self.executor = concurrent.futures.ThreadPoolExecutor(thread_per_worker)
 
     def _load_batches(self):
         batch_size = self.batch_size
@@ -263,18 +265,18 @@ class TextImageDataset(Dataset):
 
         # Use threading for concurrent image loading
         raw_images = []
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = [
-                executor.submit(
-                    self._load_image,
-                    sample,
-                    self.session,
-                    self.image_folder_path,
-                    self.timeout,
-                )
-                for sample in batch
-            ]
-            raw_images = [future.result() for future in futures]
+        # with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = [
+            self.executor.submit(
+                self._load_image,
+                sample,
+                self.session,
+                self.image_folder_path,
+                self.timeout,
+            )
+            for sample in batch
+        ]
+        raw_images = [future.result() for future in futures]
 
         images = []
         training_prompts = []

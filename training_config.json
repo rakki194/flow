@@ -65,7 +65,8 @@
         "resolution_step": 64,
         "num_workers": 2,
         "prefetch_factor": 2,
-        "ratio_cutoff": 2.0
+        "ratio_cutoff": 2.0,
+        "thread_per_worker": 100
     },
     "model": {
         "chroma_path": "models/flux/FLUX.1-schnell/chroma-8.9b.safetensors",
