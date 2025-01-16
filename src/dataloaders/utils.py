@@ -2,6 +2,7 @@ import os
 import sys
 import csv
 import json
+import random
 from tqdm import tqdm
 
 csv.field_size_limit(sys.maxsize)
@@ -136,3 +137,38 @@ def prepare_jsonl(
             jsonl_pbar.update(1)
 
     return jsonl
+
+
+def sample_jsonl(input_file, output_file, sample_size, seed=None):
+    """
+    Create a random sample of lines from a large JSONL file using reservoir sampling.
+
+    Parameters:
+        input_file (str): Path to the input JSONL file.
+        output_file (str): Path to the output JSONL file.
+        sample_size (int): Number of lines to sample.
+        seed (int, optional): Random seed for reproducibility. Defaults to None.
+    """
+    if seed is not None:
+        random.seed(seed)
+
+    reservoir = []
+    total_lines = 0
+
+    # Reservoir sampling to select random lines
+    with open(input_file, 'r', encoding='utf-8') as infile:
+        for line in infile:
+            total_lines += 1
+            if len(reservoir) < sample_size:
+                reservoir.append(line)
+            else:
+                # Replace a random element with decreasing probability
+                replace_idx = random.randint(0, total_lines - 1)
+                if replace_idx < sample_size:
+                    reservoir[replace_idx] = line
+
+    # Write the sampled lines to the output file
+    with open(output_file, 'w', encoding='utf-8') as outfile:
+        outfile.writelines(reservoir)
+    
+    print(f"Sample of {sample_size} lines written to {output_file}")
