@@ -114,6 +114,35 @@ def setup_distributed(rank, world_size):
     torch.cuda.set_device(rank)
 
 
+def create_distribution(num_points, device=None):
+    # Probability range on x axis
+    x = torch.linspace(0, 1, num_points, device=device)
+
+    # Custom probability density function 
+    probabilities = -7.7*((x-0.5)**2) + 2
+    
+    # Normalize to sum to 1
+    probabilities /= probabilities.sum()
+    
+    return x, probabilities
+
+
+def sample_from_distribution(x, probabilities, num_samples, device=None):
+    # Step 1: Compute the cumulative distribution function
+    cdf = torch.cumsum(probabilities, dim=0)
+    
+    # Step 2: Generate uniform random samples
+    uniform_samples = torch.rand(num_samples, device=device)
+    
+    # Step 3: Map uniform samples to the x values using the CDF
+    indices = torch.searchsorted(cdf, uniform_samples, right=True)
+    
+    # Get the corresponding x values for the sampled indices
+    sampled_values = x[indices]
+    
+    return sampled_values
+
+
 def prepare_sot_pairings(latents):
     # stochastic optimal transport pairings
     # just use mean because STD is so small and practically negligible
@@ -123,9 +152,13 @@ def prepare_sot_pairings(latents):
     image_pos_id = prepare_latent_image_ids(n, h, w)
 
     # randomize ode timesteps
-    input_timestep = torch.round(
-        F.sigmoid(torch.randn((n,), device=latents.device)), decimals=3
-    )
+    # input_timestep = torch.round(
+    #     F.sigmoid(torch.randn((n,), device=latents.device)), decimals=3
+    # )
+    num_points = 1000  # Number of points in the range
+    x, probabilities = create_distribution(num_points, device=latents.device)
+    input_timestep = sample_from_distribution(x, probabilities, n, device=latents.device)
+
     timesteps = input_timestep[:, None, None]
     # 1 is full noise 0 is full image
     noise = torch.randn_like(latents)
@@ -379,6 +412,7 @@ def train_chroma(rank, world_size, debug=False):
     # load model
     with torch.no_grad():
         # load chroma and enable grad
+        chroma_params._use_compiled = True
         with torch.device("meta"):
             model = Chroma(chroma_params)
         model.load_state_dict(load_safetensors(model_config.chroma_path), assign=True)
@@ -527,7 +561,7 @@ def train_chroma(rank, world_size, debug=False):
                         + training_config.cache_minibatch
                     ],
                     padding="max_length",
-                    max_length=training_config.t5_max_length,
+                    max_length=model_config.t5_max_length,
                     truncation=True,
                     return_length=False,
                     return_overflowing_tokens=False,
@@ -588,7 +622,7 @@ def train_chroma(rank, world_size, debug=False):
             # NOTE:
             # using static guidance 1 for now
             # this should be disabled later on !
-            static_guidance = torch.tensor([1.0] * acc_latents.shape[0], device=rank)
+            static_guidance = torch.tensor([0.0] * acc_latents.shape[0], device=rank)
 
         # set the input to requires grad to make autograd works
         noisy_latents.requires_grad_(True)
@@ -656,7 +690,7 @@ def train_chroma(rank, world_size, debug=False):
         if (counter + 1) % training_config.save_every == 0 and rank == 0:
             torch.save(
                 model.state_dict(),
-                f"{training_config.save_folder}/{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}.pth",
+                f"{training_config.save_folder}/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.pth",
             )
         if not debug:
             dist.barrier()
@@ -757,7 +791,7 @@ def train_chroma(rank, world_size, debug=False):
 
                 # Save the combined grid
                 file_path = os.path.join(
-                    inference_config.inference_folder, f"{counter}.png"
+                    inference_config.inference_folder, f"{counter}.jpg"
                 )
                 save_image(final_grid, file_path)
                 print(f"Combined image grid saved to {file_path}")
@@ -780,7 +814,7 @@ def train_chroma(rank, world_size, debug=False):
     if rank == 0:
         torch.save(
             model.state_dict(),
-            f"{training_config.save_folder}/{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}.pth",
+            f"{training_config.save_folder}/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.pth",
         )
 
     if not debug:
