@@ -79,7 +79,8 @@ class TextImageDataset(Dataset):
         # slice batches using round robbin
         self._round_robin()
         self.session = requests.Session()
-        self.executor = concurrent.futures.ThreadPoolExecutor(thread_per_worker)
+        self.thread_per_worker = thread_per_worker
+        # self.executor = concurrent.futures.ThreadPoolExecutor(thread_per_worker)
 
     def _load_batches(self):
         batch_size = self.batch_size
@@ -254,7 +255,7 @@ class TextImageDataset(Dataset):
                             return Image.open(alt_image_path).convert("RGB")
             return None
         except Exception as e:
-            log.error(f"An error occurred: {e} for {sample['filename']}")
+            log.error(f"An error occurred: {e} for {sample['filename']} on rank {self.rank}")
             return None
 
     def __len__(self):
@@ -265,18 +266,18 @@ class TextImageDataset(Dataset):
 
         # Use threading for concurrent image loading
         raw_images = []
-        # with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = [
-            self.executor.submit(
-                self._load_image,
-                sample,
-                self.session,
-                self.image_folder_path,
-                self.timeout,
-            )
-            for sample in batch
-        ]
-        raw_images = [future.result() for future in futures]
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = [
+                executor.submit(
+                    self._load_image,
+                    sample,
+                    self.session,
+                    self.image_folder_path,
+                    self.timeout,
+                )
+                for sample in batch
+            ]
+            raw_images = [future.result() for future in futures]
 
         images = []
         training_prompts = []
@@ -312,7 +313,7 @@ class TextImageDataset(Dataset):
                     training_prompts.append(sample["caption_or_tags"])
 
             except Exception as e:
-                log.error(f"An error occurred: {e} for {sample['filename']}")
+                log.error(f"An error occurred: {e} for {sample['filename']} on rank {self.rank}")
                 continue
 
         # echo short batch
