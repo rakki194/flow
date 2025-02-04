@@ -12,6 +12,7 @@
         "trained_double_blocks": 2,
         "save_every": 6,
         "save_folder": "testing",
+        "wandb_key": null,
         "wandb_project": null,
         "wandb_run": "chroma",
         "wandb_entity": null,
