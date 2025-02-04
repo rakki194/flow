@@ -255,7 +255,9 @@ class TextImageDataset(Dataset):
                             return Image.open(alt_image_path).convert("RGB")
             return None
         except Exception as e:
-            log.error(f"An error occurred: {e} for {sample['filename']} on rank {self.rank}")
+            log.error(
+                f"An error occurred: {e} for {sample['filename']} on rank {self.rank}"
+            )
             return None
 
     def __len__(self):
@@ -313,7 +315,9 @@ class TextImageDataset(Dataset):
                     training_prompts.append(sample["caption_or_tags"])
 
             except Exception as e:
-                log.error(f"An error occurred: {e} for {sample['filename']} on rank {self.rank}")
+                log.error(
+                    f"An error occurred: {e} for {sample['filename']} on rank {self.rank}"
+                )
                 continue
 
         # echo short batch

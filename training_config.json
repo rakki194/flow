@@ -14,7 +14,9 @@
         "save_folder": "testing",
         "wandb_project": null,
         "wandb_run": "chroma",
-        "wandb_entity": null
+        "wandb_entity": null,
+        "hf_repo_id": null,
+        "hf_token": null
     },
     "inference": {
         "inference_every": 2,
