@@ -1,14 +1,11 @@
 import torch.multiprocessing as mp
 import os
+import torch
 
-# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 from src.trainer.train_chroma import train_chroma
-# from src.trainer.double_backward_bug import train_chroma
 if __name__ == "__main__":
     
-    # train_chroma(0, 2, True)
-    # Number of GPUs to use
-    world_size = 2
+    world_size = torch.cuda.device_count()
 
     # Use spawn method for starting processes
     mp.spawn(
