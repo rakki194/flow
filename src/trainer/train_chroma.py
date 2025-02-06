@@ -40,6 +40,7 @@ from src.general_utils import load_file_multipart, load_selected_keys, load_safe
 import src.lora_and_quant as lora_and_quant
 
 from huggingface_hub import HfApi, upload_file
+import time
 
 
 @dataclass
@@ -132,16 +133,26 @@ def create_distribution(num_points, device=None):
     return x, probabilities
 
 
-# Upload the model to Hugging Face Hub asynchronously
-def upload_to_hf(model_filename, path_in_repo, repo_id, token):
+# Upload the model to Hugging Face Hub
+def upload_to_hf(model_filename, path_in_repo, repo_id, token, max_retries=3):
     api = HfApi()
-    upload_file(
-        path_or_fileobj=model_filename,
-        path_in_repo=path_in_repo,
-        repo_id=repo_id,
-        token=token,
-    )
-    print(f"Model uploaded to {repo_id}/{path_in_repo}")
+
+    for attempt in range(max_retries):
+        try:
+            upload_file(
+                path_or_fileobj=model_filename,
+                path_in_repo=path_in_repo,
+                repo_id=repo_id,
+                token=token,
+            )
+            print(f"Model uploaded to {repo_id}/{path_in_repo}")
+            return  # Exit function if successful
+
+        except Exception as e:
+            print(f"Upload attempt {attempt + 1} failed: {e}")
+            time.sleep(2**attempt)  # Exponential backoff
+
+    print("Upload failed after multiple attempts.")
 
 
 def sample_from_distribution(x, probabilities, num_samples, device=None):
