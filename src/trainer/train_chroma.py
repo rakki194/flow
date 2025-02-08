@@ -687,22 +687,23 @@ def train_chroma(rank, world_size, debug=False):
             loss_log = sum(loss_log) / len(loss_log)
             # offload some params to cpu just enough to make room for the caching process
             # and only offload non trainable params
+            del acc_embeddings, noisy_latents, acc_latents
+            torch.cuda.empty_cache()
             offload_param_count = 0
             for name, param in model.named_parameters():
                 if not any(keyword in name for keyword in trained_layer_keywords):
                     if offload_param_count < training_config.offload_param_count:
                         offload_param_count += param.numel()
-                        param.data = param.data.to("cpu")
+                        param.data = param.data.to("cpu", non_blocking=True)
+            optimizer_state_to(optimizer, rank)
 
-            del acc_embeddings, noisy_latents, acc_latents
-            torch.cuda.empty_cache()
             StochasticAccumulator.reassign_grad_buffer(model)
 
             if not debug:
                 synchronize_gradients(model)
 
             scheduler.step()
-            optimizer_state_to(optimizer, rank)
+            
             optimizer.step()
             optimizer.zero_grad()
 
