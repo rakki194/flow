@@ -668,7 +668,9 @@ def train_chroma(rank, world_size, debug=False):
                     pred = model(
                         img=noisy_latents[tmb_i * mb : tmb_i * mb + mb],
                         img_ids=image_pos_id[tmb_i * mb : tmb_i * mb + mb],
-                        txt=acc_embeddings[tmb_i * mb : tmb_i * mb + mb].to(rank),
+                        txt=acc_embeddings[tmb_i * mb : tmb_i * mb + mb].to(
+                            rank, non_blocking=True
+                        ),
                         txt_ids=text_ids[tmb_i * mb : tmb_i * mb + mb],
                         timesteps=input_timestep[tmb_i * mb : tmb_i * mb + mb],
                         guidance=static_guidance[tmb_i * mb : tmb_i * mb + mb],
@@ -703,7 +705,7 @@ def train_chroma(rank, world_size, debug=False):
                 synchronize_gradients(model)
 
             scheduler.step()
-            
+
             optimizer.step()
             optimizer.zero_grad()
 
@@ -771,7 +773,9 @@ def train_chroma(rank, world_size, debug=False):
 
                         # Create a grid for this prompt
                         grid = make_grid(
-                            gathered_images.clamp(-1, 1).add(1).div(2), nrow=8, normalize=True
+                            gathered_images.clamp(-1, 1).add(1).div(2),
+                            nrow=8,
+                            normalize=True,
                         )  # Adjust nrow as needed
                         all_grids.append(grid)
 
@@ -816,7 +820,9 @@ def train_chroma(rank, world_size, debug=False):
 
                             # Create a grid for this prompt
                             grid = make_grid(
-                                gathered_images.clamp(-1, 1).add(1).div(2), nrow=8, normalize=True
+                                gathered_images.clamp(-1, 1).add(1).div(2),
+                                nrow=8,
+                                normalize=True,
                             )  # Adjust nrow as needed
                             all_grids.append(grid)
 
