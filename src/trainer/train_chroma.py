@@ -268,7 +268,7 @@ def optimizer_state_to(optimizer, device):
         for key, value in state.items():
             # Check if the item is a tensor
             if isinstance(value, torch.Tensor):
-                state[key] = value.to(device)
+                state[key] = value.to(device, non_blocking=True)
 
 
 def save_part(model, trained_layer_keywords, counter, save_folder):
@@ -770,7 +770,7 @@ def train_chroma(rank, world_size, debug=False):
 
                         # Create a grid for this prompt
                         grid = make_grid(
-                            gathered_images, nrow=8, normalize=True
+                            gathered_images.clamp(-1, 1).add(1).div(2), nrow=8, normalize=True
                         )  # Adjust nrow as needed
                         all_grids.append(grid)
 
@@ -815,7 +815,7 @@ def train_chroma(rank, world_size, debug=False):
 
                             # Create a grid for this prompt
                             grid = make_grid(
-                                gathered_images, nrow=8, normalize=True
+                                gathered_images.clamp(-1, 1).add(1).div(2), nrow=8, normalize=True
                             )  # Adjust nrow as needed
                             all_grids.append(grid)
 
