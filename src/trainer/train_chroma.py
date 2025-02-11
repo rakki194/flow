@@ -826,6 +826,20 @@ def train_chroma(rank, world_size, debug=False):
                             )  # Adjust nrow as needed
                             all_grids.append(grid)
 
+                # send prompt to rank 0
+                if rank != 0:
+                    dist.send_object_list(caption[:1], dst=0)
+
+                else:
+                    all_prompt = []
+                    # Rank 0 receives from all other ranks
+                    for src_rank in range(1, world_size):
+                        # Initialize empty list with the same size to receive strings
+                        received_strings = [None]
+                        # Receive the list of strings
+                        dist.recv_object_list(received_strings, src=src_rank)
+                        all_prompt.extend(received_strings)
+
                 if rank == 0:
                     # Combine all grids vertically
                     final_grid = torch.cat(
@@ -844,7 +858,8 @@ def train_chroma(rank, world_size, debug=False):
                         wandb.log(
                             {
                                 "example_image": wandb.Image(
-                                    file_path, caption="\n".join(preview_prompts)
+                                    file_path,
+                                    caption="\n".join(preview_prompts + all_prompt),
                                 )
                             }
                         )
