@@ -186,7 +186,7 @@ def prepare_sot_pairings(latents):
     noisy_latents = noise * (1 - timesteps) + latents * timesteps
 
     # target vector that being regressed on
-    target = noise - latents
+    target = latents - noise
 
     return noisy_latents, target, input_timestep
 
