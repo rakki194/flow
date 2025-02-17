@@ -7,7 +7,6 @@ import torch.nn.functional as F
 import torch.utils.checkpoint as ckpt
 
 
-
 def modulate(x, scale):
     return x * (1 + scale.unsqueeze(1))
 
@@ -690,9 +689,7 @@ class Lumina(nn.Module):
         # refine context
         for layer in self.context_refiner:
             if self.training:
-                cap_feats = ckpt.checkpoint(
-                    layer, cap_feats, cap_mask, cap_freqs_cis
-                )
+                cap_feats = ckpt.checkpoint(layer, cap_feats, cap_mask, cap_freqs_cis)
             else:
                 cap_feats = layer(cap_feats, cap_mask, cap_freqs_cis)
 
