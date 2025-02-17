@@ -366,7 +366,7 @@ def inference_wrapper(
             ).hidden_states[-2]
 
             text_inputs_neg = gemma_tokenizer(
-                PROMPT,
+                [""]*len(PROMPT),
                 padding="max_length",
                 max_length=GEMMA_MAX_LENGTH,
                 truncation=True,
@@ -525,6 +525,7 @@ def train_lumina(rank, world_size, debug=False):
             images, caption, index = data[0]
             # just in case the dataloader is failing
             caption = [x if x is not None else "" for x in caption]
+            caption = [f"You are an assistant designed to generate high-quality images with the highest degree of image-text alignment based on textual prompts. <Prompt Start> {x}" for x in caption]
             if counter % training_config.change_layer_every == 0:
                 # periodically remove the optimizer and swap it with new one
                 # aliasing to make it cleaner
