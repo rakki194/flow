@@ -28,6 +28,7 @@ from src.models.lumina.model import Lumina_2b
 from src.models.lumina.sampling import get_noise, get_schedule, denoise_cfg
 
 from src.models.lumina.autoencoder import AutoEncoder, ae_params
+from src.models.lumina.sampling import time_shift, get_lin_function
 from src.math_utils import cosine_optimal_transport
 from src.general_utils import load_file_multipart, load_selected_keys, load_safetensors
 
@@ -171,6 +172,9 @@ def prepare_sot_pairings(latents):
     input_timestep = sample_from_distribution(
         x, probabilities, n, device=latents.device
     )
+
+    # biasing towards earlier more noisy steps where it's the most non linear
+    input_timestep = time_shift(get_lin_function()(int(h*w)), 1, input_timestep)
 
     timesteps = input_timestep[:, None, None, None]
     # 0 is full noise 1 is full image
@@ -660,7 +664,7 @@ def train_lumina(rank, world_size, debug=False):
                     noisy_latents,
                     target,
                     input_timestep,
-                ) = prepare_sot_pairings(acc_latents.to(rank))
+                ) = prepare_sot_pairings(acc_latents.to(rank, non_blocking=True))
                 noisy_latents = noisy_latents.to(torch.bfloat16)
                 target = target.to(torch.bfloat16)
                 input_timestep = input_timestep.to(torch.bfloat16)
