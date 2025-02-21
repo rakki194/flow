@@ -567,6 +567,8 @@ class T5Stack(nn.Module):
         self.dropout = nn.Dropout(config.dropout_rate)
         self.dispatcher = None
 
+        self.num_heads = config.num_heads
+
     def init_dispatcher(self, max_workers=100):
         self.dispatcher = ThreadPoolExecutor(max_workers=max_workers)
 
@@ -582,6 +584,12 @@ class T5Stack(nn.Module):
 
         if attention_mask == None:
             attention_mask = -torch.zeros([b, 1, 1, l], device=device)
+
+        else:
+            attention_mask = attention_mask.float().T @ attention_mask.float()
+            attention_mask = attention_mask[None, None, ...].repeat(b, self.num_heads, 1, 1)
+            attention_mask[attention_mask==0] = torch.finfo(torch.bfloat16).min
+            attention_mask[attention_mask==1] = 0
 
         position_bias = None
         for i, layer_module in enumerate(self.block):
