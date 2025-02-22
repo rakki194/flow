@@ -347,7 +347,8 @@ def inference_wrapper(
             noise = get_noise(len(PROMPT), HEIGHT, WIDTH, DEVICE, torch.bfloat16, SEED)
             noise = noise.to(rank)
 
-            timesteps = get_schedule(STEPS, WIDTH // 16 * HEIGHT // 16)
+            # timesteps = get_schedule(STEPS, WIDTH // 16 * HEIGHT // 16)
+            timesteps = get_schedule(STEPS, 4096**2)
 
             model.to("cpu")
             ae.to("cpu")
