@@ -372,8 +372,22 @@ def inference_wrapper(
                 return_tensors="pt",
             ).to(t5.device)
 
-            t5_embed = t5(text_inputs.input_ids).to(rank)
+            t5_embed = t5(text_inputs.input_ids, text_inputs.attention_mask).to(rank)
+
+            text_inputs_neg = t5_tokenizer(
+                [""],
+                padding="max_length",
+                max_length=T5_MAX_LENGTH,
+                truncation=True,
+                return_length=False,
+                return_overflowing_tokens=False,
+                return_tensors="pt",
+            ).to(t5.device)
+            
+            t5_embed_neg = t5(text_inputs_neg.input_ids, text_inputs.attention_mask).to(rank)
+
             text_ids = torch.zeros((len(PROMPT), T5_MAX_LENGTH, 3), device=rank)
+            neg_text_ids = torch.zeros((len(PROMPT), T5_MAX_LENGTH, 3), device=rank)
 
             ae.to("cpu")
             t5.to("cpu")
@@ -383,8 +397,9 @@ def inference_wrapper(
                 noise,
                 image_pos_id,
                 t5_embed,
-                torch.zeros_like(t5_embed),
+                t5_embed_neg,
                 text_ids,
+                neg_text_ids,
                 timesteps,
                 GUIDANCE,
                 CFG,
@@ -590,7 +605,7 @@ def train_chroma(rank, world_size, debug=False):
                     ).to(t5.device)
 
                     # offload to cpu
-                    t5_embed = t5(text_inputs.input_ids).to("cpu", non_blocking=True)
+                    t5_embed = t5(text_inputs.input_ids, text_inputs.attention_mask).to("cpu", non_blocking=True)
                     acc_embeddings.append(t5_embed)
 
                     # flush
