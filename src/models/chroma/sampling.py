@@ -100,6 +100,7 @@ def denoise_cfg(
     # negative guidance
     neg_txt: Tensor,
     txt_ids: Tensor,
+    neg_txt_ids: Tensor,
     # sampling parameters
     timesteps: list[float],
     guidance: float = 4.0,
@@ -129,7 +130,7 @@ def denoise_cfg(
                 img=img,
                 img_ids=img_ids,
                 txt=neg_txt,
-                txt_ids=txt_ids,
+                txt_ids=neg_txt_ids,
                 timesteps=t_vec,
                 guidance=guidance_vec,
             )
