@@ -383,8 +383,10 @@ def inference_wrapper(
                 return_overflowing_tokens=False,
                 return_tensors="pt",
             ).to(t5.device)
-            
-            t5_embed_neg = t5(text_inputs_neg.input_ids, text_inputs.attention_mask).to(rank)
+
+            t5_embed_neg = t5(text_inputs_neg.input_ids, text_inputs.attention_mask).to(
+                rank
+            )
 
             text_ids = torch.zeros((len(PROMPT), T5_MAX_LENGTH, 3), device=rank)
             neg_text_ids = torch.zeros((len(PROMPT), T5_MAX_LENGTH, 3), device=rank)
@@ -400,6 +402,8 @@ def inference_wrapper(
                 t5_embed_neg,
                 text_ids,
                 neg_text_ids,
+                text_inputs.attention_mask,
+                text_inputs_neg.attention_mask,
                 timesteps,
                 GUIDANCE,
                 CFG,
@@ -576,6 +580,7 @@ def train_chroma(rank, world_size, debug=False):
 
             acc_latents = []
             acc_embeddings = []
+            acc_mask = []
             for mb_i in tqdm(
                 range(
                     dataloader_config.batch_size
@@ -605,8 +610,11 @@ def train_chroma(rank, world_size, debug=False):
                     ).to(t5.device)
 
                     # offload to cpu
-                    t5_embed = t5(text_inputs.input_ids, text_inputs.attention_mask).to("cpu", non_blocking=True)
+                    t5_embed = t5(text_inputs.input_ids, text_inputs.attention_mask).to(
+                        "cpu", non_blocking=True
+                    )
                     acc_embeddings.append(t5_embed)
+                    acc_mask.append(text_inputs.attention_mask)
 
                     # flush
                     torch.cuda.empty_cache()
@@ -637,6 +645,7 @@ def train_chroma(rank, world_size, debug=False):
 
             acc_latents = torch.cat(acc_latents, dim=0)
             acc_embeddings = torch.cat(acc_embeddings, dim=0)
+            acc_mask = torch.cat(acc_mask, dim=0)
 
             # process the cache buffer now!
             with torch.no_grad(), torch.autocast(
@@ -681,14 +690,27 @@ def train_chroma(rank, world_size, debug=False):
                 # do this inside for loops!
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                     pred = model(
-                        img=noisy_latents[tmb_i * mb : tmb_i * mb + mb],
-                        img_ids=image_pos_id[tmb_i * mb : tmb_i * mb + mb],
+                        img=noisy_latents[tmb_i * mb : tmb_i * mb + mb].to(
+                            rank, non_blocking=True
+                        ),
+                        img_ids=image_pos_id[tmb_i * mb : tmb_i * mb + mb].to(
+                            rank, non_blocking=True
+                        ),
                         txt=acc_embeddings[tmb_i * mb : tmb_i * mb + mb].to(
                             rank, non_blocking=True
                         ),
-                        txt_ids=text_ids[tmb_i * mb : tmb_i * mb + mb],
-                        timesteps=input_timestep[tmb_i * mb : tmb_i * mb + mb],
-                        guidance=static_guidance[tmb_i * mb : tmb_i * mb + mb],
+                        txt_ids=text_ids[tmb_i * mb : tmb_i * mb + mb].to(
+                            rank, non_blocking=True
+                        ),
+                        txt_mask=acc_mask[tmb_i * mb : tmb_i * mb + mb].to(
+                            rank, non_blocking=True
+                        ),
+                        timesteps=input_timestep[tmb_i * mb : tmb_i * mb + mb].to(
+                            rank, non_blocking=True
+                        ),
+                        guidance=static_guidance[tmb_i * mb : tmb_i * mb + mb].to(
+                            rank, non_blocking=True
+                        ),
                     )
                     # TODO: need to scale the loss with rank count and grad accum!
                     loss = (

@@ -321,6 +321,7 @@ class DoubleStreamBlock(nn.Module):
         txt: Tensor,
         pe: Tensor,
         distill_vec: list[ModulationOut],
+        mask: Tensor,
     ) -> tuple[Tensor, Tensor]:
         (img_mod1, img_mod2), (txt_mod1, txt_mod2) = distill_vec
 
@@ -355,7 +356,7 @@ class DoubleStreamBlock(nn.Module):
         k = torch.cat((txt_k, img_k), dim=2)
         v = torch.cat((txt_v, img_v), dim=2)
 
-        attn = attention(q, k, v, pe=pe)
+        attn = attention(q, k, v, pe=pe, mask=mask)
         txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
 
         # calculate the img bloks
@@ -443,7 +444,7 @@ class SingleStreamBlock(nn.Module):
             return _modulation_gate_fn(x, gate, gate_params)
 
     def forward(
-        self, x: Tensor, pe: Tensor, distill_vec: list[ModulationOut]
+        self, x: Tensor, pe: Tensor, distill_vec: list[ModulationOut], mask: Tensor
     ) -> Tensor:
         mod = distill_vec
         # replaced with compiled fn
@@ -457,7 +458,7 @@ class SingleStreamBlock(nn.Module):
         q, k = self.norm(q, k, v)
 
         # compute attention
-        attn = attention(q, k, v, pe=pe)
+        attn = attention(q, k, v, pe=pe, mask=mask)
         # compute activation in mlp stream, cat again and run second linear layer
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
         # replaced with compiled fn

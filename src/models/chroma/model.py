@@ -53,6 +53,39 @@ chroma_params = ChromaParams(
 )
 
 
+def modify_mask_to_attend_padding(mask, max_seq_length, num_extra_padding=8):
+    """
+    Modifies attention mask to allow attention to a few extra padding tokens.
+
+    Args:
+        mask: Original attention mask (1 for tokens to attend to, 0 for masked tokens)
+        max_seq_length: Maximum sequence length of the model
+        num_extra_padding: Number of padding tokens to unmask
+
+    Returns:
+        Modified mask
+    """
+    # Get the actual sequence length from the mask
+    seq_length = mask.sum(dim=-1)
+    batch_size = mask.shape[0]
+
+    modified_mask = mask.clone()
+
+    for i in range(batch_size):
+        current_seq_len = int(seq_length[i].item())
+
+        # Only add extra padding tokens if there's room
+        if current_seq_len < max_seq_length:
+            # Calculate how many padding tokens we can unmask
+            available_padding = max_seq_length - current_seq_len
+            tokens_to_unmask = min(num_extra_padding, available_padding)
+
+            # Unmask the specified number of padding tokens right after the sequence
+            modified_mask[i, current_seq_len : current_seq_len + tokens_to_unmask] = 1
+
+    return modified_mask
+
+
 class Chroma(nn.Module):
     """
     Transformer model for flow matching on sequences.
@@ -141,8 +174,10 @@ class Chroma(nn.Module):
         img_ids: Tensor,
         txt: Tensor,
         txt_ids: Tensor,
+        txt_mask: Tensor,
         timesteps: Tensor,
         guidance: Tensor,
+        attn_padding: int = 1,
     ) -> Tensor:
         if img.ndim != 3 or txt.ndim != 3:
             raise ValueError("Input img and txt tensors must have 3 dimensions.")
@@ -179,6 +214,32 @@ class Chroma(nn.Module):
         ids = torch.cat((txt_ids, img_ids), dim=1)
         pe = self.pe_embedder(ids)
 
+        # compute mask
+        # assume max seq length from the batched input
+
+        max_len = txt.shape[1]
+
+        # mask
+        with torch.no_grad():
+            txt_mask_w_padding = modify_mask_to_attend_padding(
+                txt_mask, max_len, attn_padding
+            )
+            txt_img_mask = torch.cat(
+                [
+                    txt_mask_w_padding,
+                    torch.ones([img.shape[0], img.shape[1]], device=txt_mask.device),
+                ],
+                dim=1,
+            )
+            txt_img_mask = txt_img_mask.float().T @ txt_img_mask.float()
+            txt_img_mask = (
+                txt_img_mask[None, None, ...]
+                .repeat(txt.shape[0], self.num_heads, 1, 1)
+                .int()
+                .bool()
+            )
+            # txt_mask_w_padding[txt_mask_w_padding==False] = True
+
         for i, block in enumerate(self.double_blocks):
             # the guidance replaced by FFN output
             img_mod = mod_vectors_dict[f"double_blocks.{i}.img_mod.lin"]
@@ -187,17 +248,21 @@ class Chroma(nn.Module):
 
             # just in case in different GPU for simple pipeline parallel
             if self.training:
-                img, txt = ckpt.checkpoint(block, img, txt, pe, double_mod)
+                img, txt = ckpt.checkpoint(
+                    block, img, txt, pe, double_mod, txt_img_mask
+                )
             else:
-                img, txt = block(img=img, txt=txt, pe=pe, distill_vec=double_mod)
+                img, txt = block(
+                    img=img, txt=txt, pe=pe, distill_vec=double_mod, mask=txt_img_mask
+                )
 
         img = torch.cat((txt, img), 1)
         for i, block in enumerate(self.single_blocks):
             single_mod = mod_vectors_dict[f"single_blocks.{i}.modulation.lin"]
             if self.training:
-                img = ckpt.checkpoint(block, img, pe, single_mod)
+                img = ckpt.checkpoint(block, img, pe, single_mod, txt_img_mask)
             else:
-                img = block(img, pe=pe, distill_vec=single_mod)
+                img = block(img, pe=pe, distill_vec=single_mod, mask=txt_img_mask)
         img = img[:, txt.shape[1] :, ...]
         final_mod = mod_vectors_dict["final_layer.adaLN_modulation.1"]
         img = self.final_layer(

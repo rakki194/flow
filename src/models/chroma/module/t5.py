@@ -587,9 +587,11 @@ class T5Stack(nn.Module):
 
         else:
             attention_mask = attention_mask.float().T @ attention_mask.float()
-            attention_mask = attention_mask[None, None, ...].repeat(b, self.num_heads, 1, 1)
-            attention_mask[attention_mask==0] = torch.finfo(torch.bfloat16).min
-            attention_mask[attention_mask==1] = 0
+            attention_mask = attention_mask[None, None, ...].repeat(
+                b, self.num_heads, 1, 1
+            )
+            attention_mask[attention_mask == 0] = torch.finfo(torch.bfloat16).min
+            attention_mask[attention_mask == 1] = 0
 
         position_bias = None
         for i, layer_module in enumerate(self.block):

@@ -95,12 +95,15 @@ def denoise_cfg(
     # model input
     img: Tensor,
     img_ids: Tensor,
-    # positive guidance
+    # guidance
     txt: Tensor,
-    # negative guidance
     neg_txt: Tensor,
+    # guidance ID
     txt_ids: Tensor,
     neg_txt_ids: Tensor,
+    # mask
+    txt_mask: Tensor,
+    neg_txt_mask: Tensor,
     # sampling parameters
     timesteps: list[float],
     guidance: float = 4.0,
@@ -119,6 +122,7 @@ def denoise_cfg(
             img_ids=img_ids,
             txt=txt,
             txt_ids=txt_ids,
+            txt_mask=txt_mask,
             timesteps=t_vec,
             guidance=guidance_vec,
         )
@@ -131,6 +135,7 @@ def denoise_cfg(
                 img_ids=img_ids,
                 txt=neg_txt,
                 txt_ids=neg_txt_ids,
+                txt_mask=neg_txt_mask,
                 timesteps=t_vec,
                 guidance=guidance_vec,
             )
