@@ -174,7 +174,7 @@ def prepare_sot_pairings(latents):
     )
 
     # biasing towards earlier more noisy steps where it's the most non linear
-    input_timestep = time_shift(get_lin_function()(int(h*w)), 1, input_timestep)
+    input_timestep = time_shift(get_lin_function()(int(h * w)), 1, input_timestep)
 
     timesteps = input_timestep[:, None, None, None]
     # 0 is full noise 1 is full image
@@ -347,8 +347,7 @@ def inference_wrapper(
             noise = get_noise(len(PROMPT), HEIGHT, WIDTH, DEVICE, torch.bfloat16, SEED)
             noise = noise.to(rank)
 
-            # timesteps = get_schedule(STEPS, WIDTH // 16 * HEIGHT // 16)
-            timesteps = get_schedule(STEPS, 4096**2)
+            timesteps = get_schedule(STEPS, WIDTH // 16 * HEIGHT // 16)
 
             model.to("cpu")
             ae.to("cpu")
