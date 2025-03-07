@@ -190,6 +190,28 @@ class Quantized4bitLinear(nn.Module):
             return F.linear(x, dequantize_nf4(*self.linear_weight), None)
 
 
+def swap_linear_simple(model, replacement_module, include_keywords=None, **module_kwargs):
+    # explicitly included layers
+    if include_keywords is None:
+        include_keywords = []
+
+    def should_replace(name):
+        """ Replace only if the name matches one of the include keywords, or replace all if empty. """
+        return not include_keywords or any(keyword in name for keyword in include_keywords)
+
+    def recursive_swap(module, parent_name=""):
+        for name, child in module.named_children():
+            current_name = f"{parent_name}.{name}" if parent_name else name
+            if isinstance(child, nn.Linear) and should_replace(current_name):
+                setattr(module, name, replacement_module(child, **module_kwargs))
+                print(f"Replacing {current_name}")
+                log.info(f"Replacing {current_name}")
+            else:
+                recursive_swap(child, current_name)
+
+    recursive_swap(model)
+
+
 def swap_linear_recursive(
     model,
     replacement_module,

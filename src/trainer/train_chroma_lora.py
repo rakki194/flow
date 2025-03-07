@@ -37,7 +37,13 @@ from src.models.chroma.module.autoencoder import AutoEncoder, ae_params
 from src.math_utils import cosine_optimal_transport
 from src.models.chroma.module.t5 import T5EncoderModel, T5Config, replace_keys
 from src.general_utils import load_file_multipart, load_selected_keys, load_safetensors
-import src.lora_and_quant as lora_and_quant
+from src.lora_and_quant import (
+    swap_linear_simple,
+    LinearWithLoRA,
+    Quantized4BitLinearWithLoRA,
+    Quantized8BitLinearWithLoRA,
+    find_lora_params,
+)
 
 from huggingface_hub import HfApi, upload_file
 import time
@@ -52,9 +58,7 @@ class TrainingConfig:
     lr: float
     weight_decay: float
     warmup_steps: int
-    change_layer_every: int
-    trained_single_blocks: int
-    trained_double_blocks: int
+    reset_optim_every: int
     save_every: int
     save_folder: str
     wandb_key: Optional[str] = None
@@ -105,6 +109,14 @@ class ModelConfig:
     t5_tokenizer_path: str
     t5_to_8bit: bool
     t5_max_length: int
+
+
+@dataclass
+class LoraConfig:
+    rank: int
+    alpha: int
+    target_layers: list[str]
+    base_model_quant_level: Optional[str] = "full"
 
 
 def setup_distributed(rank, world_size):
@@ -271,8 +283,7 @@ def optimizer_state_to(optimizer, device):
                 state[key] = value.to(device, non_blocking=True)
 
 
-def save_part(model, trained_layer_keywords, counter, save_folder):
-    os.makedirs(save_folder, exist_ok=True)
+def save_part(model, trained_layer_keywords, path):
     full_state_dict = model.state_dict()
 
     filtered_state_dict = {}
@@ -280,9 +291,7 @@ def save_part(model, trained_layer_keywords, counter, save_folder):
         if any(keyword in k for keyword in trained_layer_keywords):
             filtered_state_dict[k] = v
 
-    torch.save(
-        filtered_state_dict, os.path.join(save_folder, f"trained_part_{counter}.pth")
-    )
+    torch.save(filtered_state_dict, path)
 
 
 def cast_linear(module, dtype):
@@ -434,6 +443,7 @@ def train_chroma(rank, world_size, debug=False):
     inference_config = InferenceConfig(**config_data["inference"])
     dataloader_config = DataloaderConfig(**config_data["dataloader"])
     model_config = ModelConfig(**config_data["model"])
+    lora_config = LoraConfig(**config_data["lora"])
     extra_inference_config = [
         InferenceConfig(**conf) for conf in config_data["extra_inference_config"]
     ]
@@ -467,6 +477,23 @@ def train_chroma(rank, world_size, debug=False):
         with torch.device("meta"):
             model = Chroma(chroma_params)
         model.load_state_dict(load_safetensors(model_config.chroma_path), assign=True)
+
+        # set trainable lora layer
+        lora_module = {
+            "full": LinearWithLoRA,
+            "8bit": Quantized8BitLinearWithLoRA,
+            "4bit": Quantized4BitLinearWithLoRA,
+        }
+
+        swap_linear_simple(
+            model,
+            lora_module[lora_config.base_model_quant_level],
+            rank=lora_config.rank,
+            alpha=lora_config.alpha,
+            include_keywords=lora_config.target_layers,
+        )
+
+        lora_params = find_lora_params(model)
 
         # randomly train inner layers at a time
         trained_double_blocks = list(range(len(model.double_blocks)))
@@ -539,24 +566,8 @@ def train_chroma(rank, world_size, debug=False):
             images, caption, index = data[0]
             # just in case the dataloader is failing
             caption = [x if x is not None else "" for x in caption]
-            if counter % training_config.change_layer_every == 0:
+            if counter % training_config.reset_optim_every == 0:
                 # periodically remove the optimizer and swap it with new one
-
-                # aliasing to make it cleaner
-                o_c = optimizer_counter
-                n_ls = training_config.trained_single_blocks
-                n_ld = training_config.trained_double_blocks
-                trained_layer_keywords = (
-                    [
-                        f"double_blocks.{x}."
-                        for x in trained_double_blocks[o_c * n_ld : o_c * n_ld + n_ld]
-                    ]
-                    + [
-                        f"single_blocks.{x}."
-                        for x in trained_single_blocks[o_c * n_ls : o_c * n_ls + n_ls]
-                    ]
-                    + ["txt_in", "img_in", "final_layer"]
-                )
 
                 # remove hooks and load the new hooks
                 if len(hooks) != 0:
@@ -564,7 +575,7 @@ def train_chroma(rank, world_size, debug=False):
 
                 optimizer, scheduler, hooks, trained_params = init_optimizer(
                     model,
-                    trained_layer_keywords,
+                    lora_params,
                     training_config.lr,
                     training_config.weight_decay,
                     training_config.warmup_steps,
@@ -754,10 +765,8 @@ def train_chroma(rank, world_size, debug=False):
 
             if (counter + 1) % training_config.save_every == 0 and rank == 0:
                 model_filename = f"{training_config.save_folder}/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.pth"
-                torch.save(
-                    model.state_dict(),
-                    model_filename,
-                )
+                save_part(model, lora_params, model_filename)
+
                 if training_config.hf_token:
                     upload_to_hf(
                         model_filename,
@@ -908,10 +917,7 @@ def train_chroma(rank, world_size, debug=False):
         # save final model
         if rank == 0:
             model_filename = f"{training_config.save_folder}/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.pth"
-            torch.save(
-                model.state_dict(),
-                model_filename,
-            )
+            save_part(model, lora_params, model_filename)
             if training_config.hf_token:
                 upload_to_hf(
                     model_filename,
