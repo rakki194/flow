@@ -437,7 +437,7 @@ def train_chroma(rank, world_size, debug=False):
     if not debug:
         setup_distributed(rank, world_size)
 
-    config_data = load_config_from_json("training_config.json")
+    config_data = load_config_from_json("training_config_chroma_lora.json")
 
     training_config = TrainingConfig(**config_data["training"])
     inference_config = InferenceConfig(**config_data["inference"])
@@ -493,7 +493,8 @@ def train_chroma(rank, world_size, debug=False):
             include_keywords=lora_config.target_layers,
         )
 
-        lora_params = find_lora_params(model)
+        trained_layer_keywords = [n for n, p in find_lora_params(model)]
+        model.to(torch.bfloat16)
 
         # randomly train inner layers at a time
         trained_double_blocks = list(range(len(model.double_blocks)))
@@ -575,7 +576,7 @@ def train_chroma(rank, world_size, debug=False):
 
                 optimizer, scheduler, hooks, trained_params = init_optimizer(
                     model,
-                    lora_params,
+                    trained_layer_keywords,
                     training_config.lr,
                     training_config.weight_decay,
                     training_config.warmup_steps,
@@ -765,7 +766,7 @@ def train_chroma(rank, world_size, debug=False):
 
             if (counter + 1) % training_config.save_every == 0 and rank == 0:
                 model_filename = f"{training_config.save_folder}/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.pth"
-                save_part(model, lora_params, model_filename)
+                save_part(model, trained_layer_keywords, model_filename)
 
                 if training_config.hf_token:
                     upload_to_hf(
@@ -917,7 +918,7 @@ def train_chroma(rank, world_size, debug=False):
         # save final model
         if rank == 0:
             model_filename = f"{training_config.save_folder}/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.pth"
-            save_part(model, lora_params, model_filename)
+            save_part(model, trained_layer_keywords, model_filename)
             if training_config.hf_token:
                 upload_to_hf(
                     model_filename,
