@@ -477,6 +477,8 @@ def train_chroma(rank, world_size, debug=False):
         with torch.device("meta"):
             model = Chroma(chroma_params)
         model.load_state_dict(load_safetensors(model_config.chroma_path), assign=True)
+        model.to(torch.bfloat16)
+        model.to(rank)
 
         # set trainable lora layer
         lora_module = {
@@ -493,8 +495,10 @@ def train_chroma(rank, world_size, debug=False):
             include_keywords=lora_config.target_layers,
         )
 
-        trained_layer_keywords = [n for n, p in find_lora_params(model)]
-        model.to(torch.bfloat16)
+        trained_layer_keywords = []
+        for n, p in find_lora_params(model):
+            trained_layer_keywords.append(n)
+            p.data = p.data.to(torch.bfloat16)
 
         # randomly train inner layers at a time
         trained_double_blocks = list(range(len(model.double_blocks)))
