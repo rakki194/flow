@@ -189,6 +189,9 @@ def prepare_sot_pairings(latents):
         x, probabilities, n, device=latents.device
     )
 
+    # biasing towards earlier more noisy steps where it's the most uncertain
+    input_timestep = time_shift(0.5, 1, input_timestep)
+
     timesteps = input_timestep[:, None, None]
     # 1 is full noise 0 is full image
     noise = torch.randn_like(latents)
@@ -713,16 +716,15 @@ def train_chroma(rank, world_size, debug=False):
                         ),
                     )
                     # TODO: need to scale the loss with rank count and grad accum!
-                    loss = (
-                        F.mse_loss(
-                            pred,
-                            target[tmb_i * mb : tmb_i * mb + mb],
-                        )
-                        / dataloader_config.batch_size
-                    )
+                    loss = F.mse_loss(
+                        pred,
+                        target[tmb_i * mb : tmb_i * mb + mb],
+                    ) / (dataloader_config.batch_size // mb)
                 torch.cuda.empty_cache()
                 loss.backward()
-                loss_log.append(loss.detach().clone() * dataloader_config.batch_size)
+                loss_log.append(
+                    loss.detach().clone() * (dataloader_config.batch_size // mb)
+                )
             loss_log = sum(loss_log) / len(loss_log)
             # offload some params to cpu just enough to make room for the caching process
             # and only offload non trainable params
