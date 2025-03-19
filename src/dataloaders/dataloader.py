@@ -115,6 +115,7 @@ class TextImageDataset(Dataset):
                 "bucket": res_bucket,
                 "is_tag_based": jsonl[i]["is_tag_based"],
                 "is_url_based": jsonl[i]["is_url_based"],
+                "loss_weight": jsonl[i]["loss_weight"]
             }
 
             if res_bucket in buckets:
@@ -283,6 +284,7 @@ class TextImageDataset(Dataset):
 
         images = []
         training_prompts = []
+        loss_weighting = []
 
         for i, sample in enumerate(batch):
             try:
@@ -314,6 +316,11 @@ class TextImageDataset(Dataset):
                 else:
                     training_prompts.append(sample["caption_or_tags"])
 
+                if "loss_weight" in sample:
+                    loss_weighting.append(sample["loss_weight"])
+                else:
+                    loss_weighting.append(1)
+
             except Exception as e:
                 log.error(
                     f"An error occurred: {e} for {sample['filename']} on rank {self.rank}"
@@ -340,4 +347,4 @@ class TextImageDataset(Dataset):
 
         images = torch.stack(images, dim=0)
 
-        return images, training_prompts, index
+        return images, training_prompts, index, loss_weighting

@@ -202,7 +202,7 @@ def prepare_sot_pairings(latents):
     )
 
     # biasing towards earlier more noisy steps where it's the most uncertain
-    input_timestep = time_shift(0.5, 1, input_timestep)
+    # input_timestep = time_shift(0.5, 1, input_timestep)
 
     timesteps = input_timestep[:, None, None]
     # 1 is full noise 0 is full image
@@ -571,9 +571,11 @@ def train_chroma(rank, world_size, debug=False):
             desc=f"training, Rank {rank}",
             position=rank,
         ):
-            images, caption, index = data[0]
+            images, caption, index, loss_weighting = data[0]
             # just in case the dataloader is failing
             caption = [x if x is not None else "" for x in caption]
+            caption = [x.lower() if torch.rand(1).item() < 0.25 else x for x in caption]
+            loss_weighting = torch.tensor(loss_weighting, device=rank)
             if counter % training_config.reset_optim_every == 0:
                 # periodically remove the optimizer and swap it with new one
 
@@ -732,10 +734,27 @@ def train_chroma(rank, world_size, debug=False):
                         ),
                     )
                     # TODO: need to scale the loss with rank count and grad accum!
-                    loss = F.mse_loss(
-                        pred,
-                        target[tmb_i * mb : tmb_i * mb + mb],
-                    ) / (dataloader_config.batch_size // mb)
+
+                    # Compute per-element squared error and mean over sequence and feature dims
+                    loss = ((pred - target[tmb_i * mb : tmb_i * mb + mb]) ** 2).mean(dim=(1, 2))  # Shape: [mb]
+
+                    # Normalize per full batch
+                    loss = loss / (dataloader_config.batch_size // mb)  # Shape: [mb]
+
+                    # Apply per-sample weight
+                    weights = loss_weighting[tmb_i * mb : tmb_i * mb + mb]  # Shape: [mb]
+
+                    # Normalize weights to ensure the overall loss scale is consistent
+                    weights = weights / weights.sum()
+
+                    # Compute final weighted loss
+                    loss = (loss * weights).sum()
+
+                    # correct!
+                    # loss = F.mse_loss(
+                    #     pred,
+                    #     target[tmb_i * mb : tmb_i * mb + mb],
+                    # ) / (dataloader_config.batch_size // mb)
                 torch.cuda.empty_cache()
                 loss.backward()
                 loss_log.append(
