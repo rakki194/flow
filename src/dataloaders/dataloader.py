@@ -336,6 +336,7 @@ class TextImageDataset(Dataset):
                 echoed_index = random.choice(list(range(len(images))))
                 images.append(images[echoed_index])
                 training_prompts.append(training_prompts[echoed_index])
+                loss_weighting.append(loss_weighting[echoed_index])
 
         # resample randomly if the entire batch failed
         while len(images) < 1:
