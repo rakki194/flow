@@ -5,6 +5,7 @@ from datetime import datetime
 from dataclasses import dataclass, asdict
 from typing import Optional
 
+from copy import deepcopy
 from tqdm import tqdm
 from safetensors.torch import safe_open, save_file
 
@@ -25,7 +26,7 @@ import wandb
 
 from src.dataloaders.dataloader import TextImageDataset
 from src.models.chroma.model import Chroma, chroma_params
-from src.models.chroma.sampling import get_noise, get_schedule, denoise_cfg
+from src.models.chroma.sampling import get_noise, get_schedule, denoise_cfg, denoise
 from src.models.chroma.utils import (
     vae_flatten,
     prepare_latent_image_ids,
@@ -105,6 +106,8 @@ class ModelConfig:
     t5_tokenizer_path: str
     t5_to_8bit: bool
     t5_max_length: int
+    teacher_steps: int
+    distillation_steps: int
 
 
 def setup_distributed(rank, world_size):
@@ -171,44 +174,113 @@ def sample_from_distribution(x, probabilities, num_samples, device=None):
     return sampled_values
 
 
-def prepare_sot_pairings(latents):
+def sigmoid_schedule(T, alpha=5.12):
+    x = torch.linspace(1, 0, T + 1)
+    ts = torch.sigmoid(x * alpha - alpha / 2)
+    return (ts - ts.min()) / (ts.max() - ts.min())  # norm
+
+
+def denoise(
+    model,
+    img,
+    img_ids,
+    txt,
+    txt_ids,
+    txt_mask,
+    timesteps,
+):
+    guidance_vec = torch.tensor([0.0] * img.shape[0], device=img.device)
+    # TODO modify the timestep so it's not hard coded and can accept batch
+    for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
+        t_vec = torch.full((img.shape[0],), t_curr, dtype=img.dtype, device=img.device)
+        pred = model(
+            img=img,
+            img_ids=img_ids,
+            txt=txt,
+            txt_ids=txt_ids,
+            txt_mask=txt_mask,
+            timesteps=t_vec,
+            guidance=guidance_vec,
+        )
+
+        img = img + (t_prev - t_curr) * pred
+
+    return img
+
+
+def prepare_rectification_vector(
+    latents,
+    embeddings,
+    mask,
+    teacher_model,
+    distillation_steps=4,
+    teacher_steps=40,
+    t5_max_length=512,
+    device="cpu",
+):
     # stochastic optimal transport pairings
     # just use mean because STD is so small and practically negligible
     latents = latents.to(torch.float32)
     latents, latent_shape = vae_flatten(latents)
     n, c, h, w = latent_shape
+    steps_per_segment = teacher_steps // distillation_steps
     image_pos_id = prepare_latent_image_ids(n, h, w)
 
-    # randomize ode timesteps
-    # input_timestep = torch.round(
-    #     F.sigmoid(torch.randn((n,), device=latents.device)), decimals=3
-    # )
-    num_points = 1000  # Number of points in the range
-    x, probabilities = create_distribution(num_points, device=latents.device)
-    input_timestep = sample_from_distribution(
-        x, probabilities, n, device=latents.device
+    # get the starting point noise level index
+    distilled_timestep_indices = torch.randint(
+        0, distillation_steps, [1], device=latents.device
     )
 
-    # biasing towards earlier more noisy steps where it's the most uncertain
-    # input_timestep = time_shift(0.5, 1, input_timestep)
+    # high step teacher ODE sample
+    t = sigmoid_schedule(teacher_steps, 5.12)
 
-    timesteps = input_timestep[:, None, None]
+    # teacher will do x inference steps to provide target vector for the student to regressed on
+    # timestep used for this batch for teacher model
+    # example:
+    # tensor([0.1702, 0.1457, 0.1230, 0.1021, 0.0830, 0.0655, 0.0496, 0.0352, 0.0222, 0.0105, 0.0000])
+    teacher_timestep_segments = t[
+        distilled_timestep_indices
+        * steps_per_segment : distilled_timestep_indices
+        * steps_per_segment
+        + steps_per_segment
+        + 1
+    ]
+    # tensor([0.1702]) and repeated to match batch size and image dim
+    student_input_timestep = teacher_timestep_segments[:1].repeat([n])[:, None, None]
+
+    # since the teacher vector is not spanning from noise to image but only a chunk of it we need to scale the magnitude
+    target_vector_scaler = torch.abs(teacher_timestep_segments[0] - teacher_timestep_segments[-1])
+
     # 1 is full noise 0 is full image
     noise = torch.randn_like(latents)
 
-    # compute OT pairings
-    transport_cost, indices = cosine_optimal_transport(
-        latents.reshape(n, -1), noise.reshape(n, -1)
+    # random lerp points for both student and the teacher
+    # student will try to regress on the teacher vector directly
+    # while the teacher use this noisy latent as the starting point to generate target vector
+    noisy_latents = (
+        latents * (1 - student_input_timestep) + noise * student_input_timestep
     )
-    noise = noise[indices[1].view(-1)]
 
-    # random lerp points
-    noisy_latents = latents * (1 - timesteps) + noise * timesteps
+    # TODO: replace this with teacher output!
+    # TODO: chunk this either in here or outside
+    text_ids = torch.zeros((n, t5_max_length, 3), device=device)
+
+    # teacher final point to generate target vector
+    teacher_less_noisy_latents = denoise(
+        model=teacher_model,
+        img=noisy_latents,
+        img_ids=image_pos_id,
+        txt=embeddings,
+        txt_ids=text_ids,
+        txt_mask=mask,
+        timesteps=teacher_timestep_segments,
+    )
 
     # target vector that being regressed on
-    target = noise - latents
+    # TODO: double check the vector direction here! im easily confused which direction the vector should point at 
+    target = (noisy_latents - teacher_less_noisy_latents) / target_vector_scaler
 
-    return noisy_latents, target, input_timestep, image_pos_id, latent_shape
+    return noisy_latents, target, student_input_timestep, image_pos_id, latent_shape
 
 
 def init_optimizer(model, trained_layer_keywords, lr, wd, warmup_steps):
@@ -431,7 +503,7 @@ def train_chroma(rank, world_size, debug=False):
     if not debug:
         setup_distributed(rank, world_size)
 
-    config_data = load_config_from_json("training_config.json")
+    config_data = load_config_from_json("training_config_reflowing.json")
 
     training_config = TrainingConfig(**config_data["training"])
     inference_config = InferenceConfig(**config_data["inference"])
@@ -470,6 +542,9 @@ def train_chroma(rank, world_size, debug=False):
         with torch.device("meta"):
             model = Chroma(chroma_params)
         model.load_state_dict(load_safetensors(model_config.chroma_path), assign=True)
+
+        # create teacher copy
+        teacher_model = deepcopy(model)
 
         # randomly train inner layers at a time
         trained_double_blocks = list(range(len(model.double_blocks)))
@@ -645,44 +720,86 @@ def train_chroma(rank, world_size, debug=False):
             if not debug:
                 dist.barrier()
 
-            # move model to device
-            model.to(rank)
 
-            acc_latents = torch.cat(acc_latents, dim=0)
-            acc_embeddings = torch.cat(acc_embeddings, dim=0)
-            acc_mask = torch.cat(acc_mask, dim=0)
 
+            ############################################################################
+
+            # move model to cpu to make room for teacher inference
+            # and move teacher to device
+            model.to("cpu")
+            teacher_model.to(rank)
             # process the cache buffer now!
             with torch.no_grad(), torch.autocast(
                 device_type="cuda", dtype=torch.bfloat16
             ):
+                
+                noisy_latents = []
+                target = []
+                input_timestep = []
+                image_pos_id = []
+                latent_shape = []
+                # TODO check this zip, i think it's correct but double check it
+                for mb_latents, mb_embeddings, mb_mask in tqdm(
+                    zip(
+                        acc_latents,
+                        acc_embeddings,
+                        acc_mask,
+                    ),
+                    desc=f"preparing target vector, Rank {rank}",
+                    position=rank,
+                ):
                 # prepare flat image and the target lerp
-                (
-                    noisy_latents,
-                    target,
-                    input_timestep,
-                    image_pos_id,
-                    latent_shape,
-                ) = prepare_sot_pairings(acc_latents.to(rank))
-                noisy_latents = noisy_latents.to(torch.bfloat16)
-                target = target.to(torch.bfloat16)
-                input_timestep = input_timestep.to(torch.bfloat16)
-                image_pos_id = image_pos_id.to(rank)
+                    (
+                        mb_noisy_latents,
+                        mb_target,
+                        mb_input_timestep,
+                        mb_image_pos_id,
+                        mb_latent_shape,
+                    ) = prepare_rectification_vector(
+                            latents=mb_latents,
+                            embeddings=mb_embeddings,
+                            mask=mb_mask,
+                            teacher_model=teacher_model,
+                            # TODO: put this to json config
+                            distillation_steps=model_config.distillation_steps,
+                            teacher_steps=model_config.teacher_steps,
+                            t5_max_length=512,
+                            device=rank,
+                        )
+
+
+                    noisy_latents.append(mb_noisy_latents.to(torch.bfloat16))
+                    target.append(mb_target.to(torch.bfloat16))
+                    input_timestep.append(mb_input_timestep.to(torch.bfloat16))
+                    image_pos_id.append(mb_image_pos_id.to(rank))
+
+                acc_embeddings = torch.cat(acc_embeddings, dim=0)
+                acc_mask = torch.cat(acc_mask, dim=0)
+                noisy_latents = torch.cat(noisy_latents, dim=0)
+                target = torch.cat(target, dim=0)
+                input_timestep = torch.cat(input_timestep, dim=0)
+                image_pos_id = torch.cat(image_pos_id, dim=0)
+
 
                 # t5 text id for the model
-                text_ids = torch.zeros((noisy_latents.shape[0], 512, 3), device=rank)
+                text_ids = torch.zeros((acc_embeddings.shape[0], 512, 3), device=rank)
                 # NOTE:
                 # using static guidance 1 for now
                 # this should be disabled later on !
                 static_guidance = torch.tensor(
-                    [0.0] * acc_latents.shape[0], device=rank
+                    [0.0] * acc_embeddings.shape[0], device=rank
                 )
+
+            # move model back to device and unload teacher
+            # to make room for training
+            model.to(rank)
+            teacher_model.to("cpu")
 
             # set the input to requires grad to make autograd works
             noisy_latents.requires_grad_(True)
             acc_embeddings.requires_grad_(True)
 
-            ot_bs = acc_latents.shape[0]
+            ot_bs = acc_embeddings.shape[0]
 
             # aliasing
             mb = training_config.train_minibatch
@@ -720,13 +837,17 @@ def train_chroma(rank, world_size, debug=False):
                     # TODO: need to scale the loss with rank count and grad accum!
 
                     # Compute per-element squared error and mean over sequence and feature dims
-                    loss = ((pred - target[tmb_i * mb : tmb_i * mb + mb]) ** 2).mean(dim=(1, 2))  # Shape: [mb]
+                    loss = ((pred - target[tmb_i * mb : tmb_i * mb + mb]) ** 2).mean(
+                        dim=(1, 2)
+                    )  # Shape: [mb]
 
                     # Normalize per full batch
                     loss = loss / (dataloader_config.batch_size // mb)  # Shape: [mb]
 
                     # Apply per-sample weight
-                    weights = loss_weighting[tmb_i * mb : tmb_i * mb + mb]  # Shape: [mb]
+                    weights = loss_weighting[
+                        tmb_i * mb : tmb_i * mb + mb
+                    ]  # Shape: [mb]
 
                     # Normalize weights to ensure the overall loss scale is consistent
                     weights = weights / weights.sum()
