@@ -224,7 +224,7 @@ def prepare_rectification_vector(
     latents, latent_shape = vae_flatten(latents)
     n, c, h, w = latent_shape
     steps_per_segment = teacher_steps // distillation_steps
-    image_pos_id = prepare_latent_image_ids(n, h, w)
+    image_pos_id = prepare_latent_image_ids(n, h, w).to(device)
 
     # get the starting point noise level index
     distilled_timestep_indices = torch.randint(
@@ -244,7 +244,7 @@ def prepare_rectification_vector(
         * steps_per_segment
         + steps_per_segment
         + 1
-    ]
+    ].to(device)
     # tensor([0.1702]) and repeated to match batch size and image dim
     student_input_timestep = teacher_timestep_segments[:1].repeat([n])[:, None, None]
 
@@ -252,7 +252,7 @@ def prepare_rectification_vector(
     target_vector_scaler = torch.abs(teacher_timestep_segments[0] - teacher_timestep_segments[-1])
 
     # 1 is full noise 0 is full image
-    noise = torch.randn_like(latents)
+    noise = torch.randn_like(latents, device=device)
 
     # random lerp points for both student and the teacher
     # student will try to regress on the teacher vector directly
@@ -280,7 +280,7 @@ def prepare_rectification_vector(
     # TODO: double check the vector direction here! im easily confused which direction the vector should point at 
     target = (noisy_latents - teacher_less_noisy_latents) / target_vector_scaler
 
-    return noisy_latents, target, student_input_timestep, image_pos_id, latent_shape
+    return noisy_latents, target, student_input_timestep.squeeze(), image_pos_id, latent_shape
 
 
 def init_optimizer(model, trained_layer_keywords, lr, wd, warmup_steps):
@@ -432,7 +432,7 @@ def inference_wrapper(
             n, c, h, w = shape
             image_pos_id = prepare_latent_image_ids(n, h, w).to(rank)
 
-            timesteps = get_schedule(STEPS, noise.shape[1])
+            timesteps = sigmoid_schedule(STEPS, 5.12).to(rank)
 
             model.to("cpu")
             ae.to("cpu")
@@ -690,9 +690,7 @@ def train_chroma(rank, world_size, debug=False):
                     ).to(t5.device)
 
                     # offload to cpu
-                    t5_embed = t5(text_inputs.input_ids, text_inputs.attention_mask).to(
-                        "cpu", non_blocking=True
-                    )
+                    t5_embed = t5(text_inputs.input_ids, text_inputs.attention_mask)                    
                     acc_embeddings.append(t5_embed)
                     acc_mask.append(text_inputs.attention_mask)
 
@@ -705,7 +703,7 @@ def train_chroma(rank, world_size, debug=False):
                             * training_config.cache_minibatch
                             + training_config.cache_minibatch
                         ].to(rank)
-                    ).to("cpu", non_blocking=True)
+                    )
                     acc_latents.append(latents)
 
                     # flush
@@ -747,6 +745,7 @@ def train_chroma(rank, world_size, debug=False):
                     ),
                     desc=f"preparing target vector, Rank {rank}",
                     position=rank,
+                    total=len(acc_latents)
                 ):
                 # prepare flat image and the target lerp
                     (
