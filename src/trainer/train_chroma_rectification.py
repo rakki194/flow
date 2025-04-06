@@ -915,9 +915,13 @@ def train_chroma(rank, world_size, debug=False):
 
                 preview_prompts = inference_config.prompts + caption[:1]
 
+                # teacher model inference
+                model.to("cpu")
+                teacher_model.to(rank)
+
                 for prompt in preview_prompts:
                     images_tensor = inference_wrapper(
-                        model=model,
+                        model=teacher_model,
                         ae=ae,
                         t5_tokenizer=t5_tokenizer,
                         t5=t5,
@@ -957,6 +961,12 @@ def train_chroma(rank, world_size, debug=False):
                             normalize=True,
                         )  # Adjust nrow as needed
                         all_grids.append(grid)
+
+
+                # student model inference
+                teacher_model.to("cpu")
+                model.to(rank)
+
 
                 for extra_inference in extra_inference_config:
                     for prompt in preview_prompts:
