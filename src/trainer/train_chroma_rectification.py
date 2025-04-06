@@ -246,7 +246,9 @@ def prepare_rectification_vector(
         + 1
     ].to(device)
     # tensor([0.1702]) and repeated to match batch size and image dim
-    student_input_timestep = teacher_timestep_segments[:1].repeat([n])[:, None, None]
+    teacher_starting_input_timestep = teacher_timestep_segments[:1].repeat([n])[
+        :, None, None
+    ]
 
     # since the teacher vector is not spanning from noise to image but only a chunk of it we need to scale the magnitude
     target_vector_scaler = torch.abs(
@@ -260,7 +262,8 @@ def prepare_rectification_vector(
     # student will try to regress on the teacher vector directly
     # while the teacher use this noisy latent as the starting point to generate target vector
     noisy_latents = (
-        latents * (1 - student_input_timestep) + noise * student_input_timestep
+        latents * (1 - teacher_starting_input_timestep)
+        + noise * teacher_starting_input_timestep
     )
 
     # TODO: replace this with teacher output!
@@ -282,8 +285,18 @@ def prepare_rectification_vector(
     # TODO: double check the vector direction here! im easily confused which direction the vector should point at
     target = (noisy_latents - teacher_less_noisy_latents) / target_vector_scaler
 
+    # now we need to pick random point between noisy latents and less noisy latents for student input latents
+    student_input_timestep = torch.empty_like(teacher_starting_input_timestep).uniform_(
+        teacher_timestep_segments.min(), teacher_timestep_segments.max()
+    )
+
+    student_noisy_latents = (
+        teacher_less_noisy_latents * (1 - student_input_timestep)
+        + noisy_latents * student_input_timestep
+    )
+
     return (
-        noisy_latents,
+        student_noisy_latents,
         target,
         student_input_timestep.squeeze(),
         image_pos_id,
