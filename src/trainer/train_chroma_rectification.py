@@ -249,7 +249,9 @@ def prepare_rectification_vector(
     student_input_timestep = teacher_timestep_segments[:1].repeat([n])[:, None, None]
 
     # since the teacher vector is not spanning from noise to image but only a chunk of it we need to scale the magnitude
-    target_vector_scaler = torch.abs(teacher_timestep_segments[0] - teacher_timestep_segments[-1])
+    target_vector_scaler = torch.abs(
+        teacher_timestep_segments[0] - teacher_timestep_segments[-1]
+    )
 
     # 1 is full noise 0 is full image
     noise = torch.randn_like(latents, device=device)
@@ -277,10 +279,16 @@ def prepare_rectification_vector(
     )
 
     # target vector that being regressed on
-    # TODO: double check the vector direction here! im easily confused which direction the vector should point at 
+    # TODO: double check the vector direction here! im easily confused which direction the vector should point at
     target = (noisy_latents - teacher_less_noisy_latents) / target_vector_scaler
 
-    return noisy_latents, target, student_input_timestep.squeeze(), image_pos_id, latent_shape
+    return (
+        noisy_latents,
+        target,
+        student_input_timestep.squeeze(),
+        image_pos_id,
+        latent_shape,
+    )
 
 
 def init_optimizer(model, trained_layer_keywords, lr, wd, warmup_steps):
@@ -690,7 +698,7 @@ def train_chroma(rank, world_size, debug=False):
                     ).to(t5.device)
 
                     # offload to cpu
-                    t5_embed = t5(text_inputs.input_ids, text_inputs.attention_mask)                    
+                    t5_embed = t5(text_inputs.input_ids, text_inputs.attention_mask)
                     acc_embeddings.append(t5_embed)
                     acc_mask.append(text_inputs.attention_mask)
 
@@ -718,8 +726,6 @@ def train_chroma(rank, world_size, debug=False):
             if not debug:
                 dist.barrier()
 
-
-
             ############################################################################
 
             # move model to cpu to make room for teacher inference
@@ -730,7 +736,7 @@ def train_chroma(rank, world_size, debug=False):
             with torch.no_grad(), torch.autocast(
                 device_type="cuda", dtype=torch.bfloat16
             ):
-                
+
                 noisy_latents = []
                 target = []
                 input_timestep = []
@@ -745,9 +751,9 @@ def train_chroma(rank, world_size, debug=False):
                     ),
                     desc=f"preparing target vector, Rank {rank}",
                     position=rank,
-                    total=len(acc_latents)
+                    total=len(acc_latents),
                 ):
-                # prepare flat image and the target lerp
+                    # prepare flat image and the target lerp
                     (
                         mb_noisy_latents,
                         mb_target,
@@ -755,17 +761,16 @@ def train_chroma(rank, world_size, debug=False):
                         mb_image_pos_id,
                         mb_latent_shape,
                     ) = prepare_rectification_vector(
-                            latents=mb_latents,
-                            embeddings=mb_embeddings,
-                            mask=mb_mask,
-                            teacher_model=teacher_model,
-                            # TODO: put this to json config
-                            distillation_steps=model_config.distillation_steps,
-                            teacher_steps=model_config.teacher_steps,
-                            t5_max_length=512,
-                            device=rank,
-                        )
-
+                        latents=mb_latents,
+                        embeddings=mb_embeddings,
+                        mask=mb_mask,
+                        teacher_model=teacher_model,
+                        # TODO: put this to json config
+                        distillation_steps=model_config.distillation_steps,
+                        teacher_steps=model_config.teacher_steps,
+                        t5_max_length=512,
+                        device=rank,
+                    )
 
                     noisy_latents.append(mb_noisy_latents.to(torch.bfloat16))
                     target.append(mb_target.to(torch.bfloat16))
@@ -778,7 +783,6 @@ def train_chroma(rank, world_size, debug=False):
                 target = torch.cat(target, dim=0)
                 input_timestep = torch.cat(input_timestep, dim=0)
                 image_pos_id = torch.cat(image_pos_id, dim=0)
-
 
                 # t5 text id for the model
                 text_ids = torch.zeros((acc_embeddings.shape[0], 512, 3), device=rank)
@@ -961,11 +965,9 @@ def train_chroma(rank, world_size, debug=False):
                         )  # Adjust nrow as needed
                         all_grids.append(grid)
 
-
                 # student model inference
                 teacher_model.to("cpu")
                 model.to(rank)
-
 
                 for extra_inference in extra_inference_config:
                     for prompt in preview_prompts:
