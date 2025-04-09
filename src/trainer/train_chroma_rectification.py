@@ -286,13 +286,25 @@ def prepare_rectification_vector(
     target = (noisy_latents - teacher_less_noisy_latents) / target_vector_scaler
 
     # now we need to pick random point between noisy latents and less noisy latents for student input latents
+    # within
+    # tensor([0.1702, ..., 0.0000])
     student_input_timestep = torch.empty_like(teacher_starting_input_timestep).uniform_(
         teacher_timestep_segments.min(), teacher_timestep_segments.max()
     )
 
+    # now we need to interpolate inside the teacher vector
+    # we need to map the point from this
+    # tensor([0.1702, ..., 0.0000])
+    # to this
+    # tensor([1.0000, ..., 0.0000])
+    # Remap from [min, max] to [0, 1]
+    t_min = teacher_timestep_segments.min()
+    t_max = teacher_timestep_segments.max()
+    student_lerp_factor = (student_input_timestep - t_min) / (t_max - t_min)
+
     student_noisy_latents = (
-        teacher_less_noisy_latents * (1 - student_input_timestep)
-        + noisy_latents * student_input_timestep
+        teacher_less_noisy_latents * (1 - student_lerp_factor)
+        + noisy_latents * student_lerp_factor
     )
 
     return (
