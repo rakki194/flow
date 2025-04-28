@@ -54,10 +54,13 @@ def _scipy_assignment(C):
     from scipy.optimize import linear_sum_assignment
 
     # Convert to numpy for scipy
-    C_np = C.detach().cpu().numpy()
+    C_np = C.to(torch.float32).detach().cpu().numpy()
     row_ind, col_ind = linear_sum_assignment(C_np)
 
     # Convert back to PyTorch tensors to match the CUDA implementation format
-    matching_pairs = (torch.tensor([row_ind]), torch.tensor([col_ind]))
+    matching_pairs = (
+        torch.tensor([row_ind], device=C.device),
+        torch.tensor([col_ind], device=C.device),
+    )
 
     return C, matching_pairs
