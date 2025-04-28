@@ -100,6 +100,7 @@ class ModelConfig:
     """Dataclass to store model paths."""
 
     chroma_path: str
+    teacher_chroma_path: str
     vae_path: str
     t5_path: str
     t5_config_path: str
@@ -232,7 +233,8 @@ def prepare_rectification_vector(
     )
 
     # high step teacher ODE sample
-    t = sigmoid_schedule(teacher_steps, 5.12)
+    # t = sigmoid_schedule(teacher_steps, 5.12)
+    t = torch.linspace(1, 0, teacher_steps + 1)
 
     # teacher will do x inference steps to provide target vector for the student to regressed on
     # timestep used for this batch for teacher model
@@ -492,7 +494,7 @@ def inference_wrapper(
                 return_tensors="pt",
             ).to(t5.device)
 
-            t5_embed_neg = t5(text_inputs_neg.input_ids, text_inputs.attention_mask).to(
+            t5_embed_neg = t5(text_inputs_neg.input_ids, text_inputs_neg.attention_mask).to(
                 rank
             )
 
@@ -572,12 +574,24 @@ def train_chroma(rank, world_size, debug=False):
     with torch.no_grad():
         # load chroma and enable grad
         chroma_params._use_compiled = True
+
         with torch.device("meta"):
             model = Chroma(chroma_params)
-        model.load_state_dict(load_safetensors(model_config.chroma_path), assign=True)
 
-        # create teacher copy
-        teacher_model = deepcopy(model)
+        # Check file extension to determine loading method
+        if model_config.chroma_path.endswith('.safetensors') or model_config.chroma_path.endswith('.sft'):
+            model.load_state_dict(load_safetensors(model_config.chroma_path), assign=True)
+        else:  # Assume PyTorch format (.pth)
+            model.load_state_dict(torch.load(model_config.chroma_path, map_location="cpu"), assign=True)
+
+        with torch.device("meta"):
+            teacher_model = Chroma(chroma_params)
+
+        # Check file extension to determine loading method
+        if model_config.teacher_chroma_path.endswith('.safetensors') or model_config.teacher_chroma_path.endswith('.sft'):
+            teacher_model.load_state_dict(load_safetensors(model_config.teacher_chroma_path), assign=True)
+        else:  # Assume PyTorch format (.pth)
+            teacher_model.load_state_dict(torch.load(model_config.teacher_chroma_path, map_location="cpu"), assign=True)
 
         # randomly train inner layers at a time
         trained_double_blocks = list(range(len(model.double_blocks)))
