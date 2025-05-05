@@ -34,7 +34,8 @@
             512,
             512
         ],
-        "t5_max_length": 512
+        "t5_max_length": 512,
+        "teacher": true
     },
     "extra_inference_config":[
         {
@@ -52,7 +53,8 @@
                 512,
                 512
             ],
-            "t5_max_length": 512
+            "t5_max_length": 512,
+            "teacher": false
         }
     ],
     "dataloader": {

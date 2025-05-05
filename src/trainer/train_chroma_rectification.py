@@ -80,6 +80,7 @@ class InferenceConfig:
     first_n_steps_wo_cfg: int
     image_dim: tuple[int, int]
     t5_max_length: int
+    teacher: bool
 
 
 @dataclass
@@ -470,7 +471,8 @@ def inference_wrapper(
             n, c, h, w = shape
             image_pos_id = prepare_latent_image_ids(n, h, w).to(rank)
 
-            timesteps = sigmoid_schedule(STEPS, 5.12).to(rank)
+            # timesteps = sigmoid_schedule(STEPS, 5.12).to(rank)
+            timesteps = torch.linspace(1, 0, STEPS + 1).to(rank)
 
             model.to("cpu")
             ae.to("cpu")
@@ -964,12 +966,17 @@ def train_chroma(rank, world_size, debug=False):
                 preview_prompts = inference_config.prompts + caption[:1]
 
                 # teacher model inference
-                model.to("cpu")
-                teacher_model.to(rank)
+                if inference_config.teacher:
+                    model.to("cpu")
+                    teacher_model.to(rank)
+                # student model inference
+                else:
+                    model.to(rank)
+                    teacher_model.to("cpu")
 
                 for prompt in preview_prompts:
                     images_tensor = inference_wrapper(
-                        model=teacher_model,
+                        model=teacher_model if inference_config.teacher else model,
                         ae=ae,
                         t5_tokenizer=t5_tokenizer,
                         t5=t5,
@@ -1010,14 +1017,21 @@ def train_chroma(rank, world_size, debug=False):
                         )  # Adjust nrow as needed
                         all_grids.append(grid)
 
-                # student model inference
-                teacher_model.to("cpu")
-                model.to(rank)
 
                 for extra_inference in extra_inference_config:
+                    # teacher model inference
+                    if extra_inference.teacher:
+                        model.to("cpu")
+                        teacher_model.to(rank)
+                    # student model inference
+                    else:
+                        model.to(rank)
+                        teacher_model.to("cpu")
+
+
                     for prompt in preview_prompts:
                         images_tensor = inference_wrapper(
-                            model=model,
+                            model=teacher_model if extra_inference.teacher else model,
                             ae=ae,
                             t5_tokenizer=t5_tokenizer,
                             t5=t5,
